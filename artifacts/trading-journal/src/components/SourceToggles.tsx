@@ -1,14 +1,16 @@
-// On/off moved off «CAB и Нигилист» (owner 2026-11-03): the main VST account's trading per bot
-// and BTC live in «Мой кабинет»; which bots subscribers may choose — on «Подписчики».
-// Each switch saves at once.
+// «Мой кабинет» (owner 2026-11-04): every setting of the main account in one place — one tab per signal
+// bot (as the subscriber cabinet): open trades on/off, trade size, how trades are led, Bitcoin.
+// «CAB и Нигилист» only shows the strategies' results. Which bots subscribers may choose — on «Подписчики».
 import { useEffect, useState } from "react";
-import { useMutation, useQuery } from "@tanstack/react-query";
+import { useMutation } from "@tanstack/react-query";
 import { Link } from "wouter";
 import { Switch } from "@/components/ui/switch";
 import { api, ApiFailure } from "@/lib/subscriber-api";
 import { useExecutor, type Status } from "@/components/executor-ui";
 import { InboxLine } from "@/components/SourceSettings";
-import { defaultBtc } from "@/components/BtcCard";
+import { BtcCard, defaultBtc } from "@/components/BtcCard";
+import { OwnerStrategyCard } from "@/components/owner-strategy-card";
+import { StrategyCard, StrategySection, NIHILIST_DESCRIPTIONS } from "@/components/StrategyCard";
 import { SizeInput, marginOf, num } from "@/components/form-bits";
 
 const LEVERAGE = 10;
@@ -27,54 +29,90 @@ function useToggle(onDone: () => void) {
   return { save: m.mutate, pending: m.isPending, msg };
 }
 
-/** «Мой кабинет», owner only: the main VST account — which bots it trades, the trade size, whether it opens BTC. */
+const sizeText = (mode: "percent" | "amount", value: number, asset: string) => (mode === "percent" ? `${value}% от баланса` : `${value} ${asset}`);
+
+/** «Мой кабинет», owner only: the main account — per bot: trading on/off, size, strategy, Bitcoin. */
 export function MainAccountToggles() {
   const ex = useExecutor();
-  const t = useToggle(() => void ex.refetch());
-  const cabStrategy = useQuery({ queryKey: ["owner-trading-strategy"], queryFn: () => api<{ strategyText: string }>("/journal/trading-strategy") });
+  const [tab, setTab] = useState<Source>(() => { try { return localStorage.getItem("cabinet-tab") === "nihilist" ? "nihilist" : "cab"; } catch { return "cab"; } });
+  const choose = (t: Source) => { setTab(t); try { localStorage.setItem("cabinet-tab", t); } catch { /* private mode */ } };
   const d = ex.data;
   if (!d) return null;
   const account = d.accounts[0];
+  const refetch = () => void ex.refetch();
   return (
-    <section className="space-y-3 border border-primary/40 bg-card p-5" data-testid="main-account-toggles">
-      <h2 className="text-base font-bold">Основной счёт{account ? ` · ${account.env === "real" ? "реальный" : "демо VST"}` : ""}</h2>
-      <p className="text-xs text-muted-foreground">
-        Твой единственный торговый счёт: здесь включается торговля и задаётся размер сделки. Как вести сделки и плечо BTC — на странице «CAB и Нигилист».
-        Выключение останавливает только новые входы: открытые сделки бот доводит до закрытия.
-      </p>
-      <div className="grid gap-3 sm:grid-cols-2">
-        {SOURCES.map((s) => {
-          const settings = d[s].settings;
-          const btc = d.btc.settings.find((b) => b.source === s) ?? defaultBtc(s);
-          const strategy = s === "cab" ? cabStrategy.data?.strategyText ?? "…" : d.nihilist.strategies.find((x) => x.id === d.nihilist.settings.strategy)?.label ?? d.nihilist.settings.strategy;
-          return (
-            <div key={s} className="space-y-3 border border-border bg-background p-4">
-              <p className="font-bold">{NAME[s]}</p>
-              <p className="text-xs">Сигналы: <InboxLine name={NAME[s]} info={d.inbox?.[s]} /></p>
-              <p className="text-xs">Стратегия: <b>{strategy}</b> · <Link href="/journal/bots" onClick={() => { try { localStorage.setItem("strategies-tab", s); } catch { /* private mode */ } }} className="text-primary underline">изменить</Link></p>
-              <label className="flex items-center justify-between gap-3 text-sm">
-                <span>
-                  Открывать сделки
-                  <span className={`block text-xs ${settings.enabled ? "text-success" : "text-destructive"}`}>{settings.enabled ? "включено" : "выключено"}</span>
-                </span>
-                <Switch checked={settings.enabled} disabled={t.pending} aria-label={`Открывать сделки по сигналам ${NAME[s]}`}
-                  onCheckedChange={(v) => t.save({ path: `/journal/executor/source-settings/${s}`, body: { ...settings, enabled: v } })} />
-              </label>
-              <SizeEditor source={s} d={d} onSaved={() => void ex.refetch()} />
-              <label className={`flex items-center justify-between gap-3 text-sm ${settings.enabled ? "" : "opacity-50"}`}>
-                <span>
-                  Открывать BTC
-                  <span className={`block text-xs ${btc.enabled ? "text-success" : "text-destructive"}`}>{btc.enabled ? `включено · ${btc.leverage}x` : "выключено"}</span>
-                </span>
-                <Switch checked={btc.enabled} disabled={t.pending} aria-label={`Открывать BTC по сигналам ${NAME[s]}`}
-                  onCheckedChange={(v) => t.save({ path: "/journal/executor/btc-settings", body: { ...btc, enabled: v, allocationMode: btc.allocationMode ?? "same" } })} />
-              </label>
-            </div>
-          );
-        })}
+    <div className="space-y-4" data-testid="main-account-toggles">
+      <section className="space-y-1 border border-primary/40 bg-card p-5">
+        <h2 className="text-base font-bold">Основной счёт{account ? ` · ${account.env === "real" ? "реальный" : "демо VST"}` : ""}</h2>
+        <p className="text-xs text-muted-foreground">
+          Все настройки счёта — здесь, отдельно для каждого бота. Сравнить результаты стратегий — на странице{" "}
+          <Link href="/journal/bots" onClick={() => { try { localStorage.setItem("strategies-tab", tab); } catch { /* private mode */ } }} className="text-primary underline">«CAB и Нигилист»</Link>.
+          Изменения действуют для новых сделок; открытые бот доводит до закрытия по своей стратегии.
+        </p>
+      </section>
+      <div role="tablist" className="flex gap-1 border-b border-border">
+        {SOURCES.map((s) => (
+          <button key={s} role="tab" type="button" aria-selected={tab === s} onClick={() => choose(s)}
+            className={`-mb-px min-h-11 border border-b-0 px-5 text-sm font-bold ${tab === s ? "border-border bg-card" : "border-transparent text-muted-foreground hover:text-foreground"}`}>
+            {NAME[s]}
+          </button>
+        ))}
       </div>
+      <BotTrading key={`t-${tab}`} source={tab} d={d} onSaved={refetch} />
+      {tab === "cab" ? <OwnerStrategyCard /> : <NihilistStrategyChoice d={d} onSaved={refetch} />}
+      <BtcCard key={`b-${tab}`} title={`Биткоин (BTC) в сделках ${tab === "cab" ? "CAB" : "Нигилиста"}`}
+        saved={d.btc.settings.find((b) => b.source === tab) ?? defaultBtc(tab)} maxLeverage={d.btc.maxLeverage}
+        savePath="/journal/executor/btc-settings" onSaved={refetch}
+        otherMargin={marginOf(d[tab].settings.allocationMode, d[tab].settings.allocationValue, account?.balance?.equity ?? null)}
+        otherText={sizeText(d[tab].settings.allocationMode, d[tab].settings.allocationValue, account?.env === "real" ? "USDT" : "VST")}
+        equity={account?.balance?.equity ?? null} asset={account?.env === "real" ? "USDT" : "VST"}
+        note={tab === "cab" ? "Ведение BTC — по правилам CAB для BTC при любой стратегии." : "Ведение BTC — по выбранной стратегии Нигилиста."} />
+    </div>
+  );
+}
+
+/** One bot: its signals, open trades on/off (saves at once), trade size. */
+function BotTrading({ source, d, onSaved }: { source: Source; d: Status; onSaved: () => void }) {
+  const t = useToggle(onSaved);
+  const settings = d[source].settings;
+  return (
+    <section className="space-y-3 border border-border bg-card p-4">
+      <p className="text-xs">Сигналы: <InboxLine name={NAME[source]} info={d.inbox?.[source]} /></p>
+      <label className="flex items-center justify-between gap-3 text-sm">
+        <span>
+          Открывать сделки по сигналам {NAME[source]}
+          <span className={`block text-xs ${settings.enabled ? "text-success" : "text-destructive"}`}>{settings.enabled ? "включено" : "выключено"}</span>
+        </span>
+        <Switch checked={settings.enabled} disabled={t.pending} aria-label={`Открывать сделки по сигналам ${NAME[source]}`}
+          onCheckedChange={(v) => t.save({ path: `/journal/executor/source-settings/${source}`, body: { ...settings, enabled: v } })} />
+      </label>
       {t.msg && <p className={`text-sm ${t.msg.bad ? "text-destructive" : "text-success"}`}>{t.msg.text}</p>}
+      <SizeEditor source={source} d={d} onSaved={onSaved} />
     </section>
+  );
+}
+
+/** Nihilist: how its trades are led (saves on click). */
+function NihilistStrategyChoice({ d, onSaved }: { d: Status; onSaved: () => void }) {
+  const [msg, setMsg] = useState<{ text: string; bad: boolean } | null>(null);
+  const pick = useMutation({
+    mutationFn: (strategy: string) => api("/journal/executor/source-settings/nihilist", { method: "POST", body: { strategy } }),
+    onSuccess: () => { setMsg({ text: "Сохранено. Действует для новых сделок; открытые закрываются по своей стратегии.", bad: false }); onSaved(); },
+    onError: (e) => setMsg({ text: e instanceof ApiFailure ? e.message : "Не удалось сохранить", bad: true }),
+  });
+  const current = d.nihilist.settings.strategy;
+  const strategies = d.nihilist.strategies;
+  return (
+    <StrategySection title="Как вести сделки Нигилиста" current={strategies.find((x) => x.id === current)?.label ?? current} message={msg}>
+      <div className="grid gap-3 sm:grid-cols-2">
+        {strategies.map((st, i) => (
+          <StrategyCard key={st.id} index={i + 1} label={st.label} description={NIHILIST_DESCRIPTIONS[st.id]}
+            saved={current === st.id} active={current === st.id} disabled={pick.isPending}
+            onClick={() => { if (current !== st.id) pick.mutate(st.id); }} />
+        ))}
+      </div>
+      <p className="text-xs text-muted-foreground">Если Нигилист закрывает сделку по сроку, бот закрывает её при любой стратегии.</p>
+    </StrategySection>
   );
 }
 

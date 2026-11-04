@@ -1,15 +1,15 @@
-// «CAB и Нигилист» (owner 2026-11-03): one tab per signal bot with its rules only — how trades are
-// led (numbered cards, same look for both) and Bitcoin. On/off and the trade size are in «Мой кабинет».
-// Each strategy card shows what that way of leading would have given to the deposit at the owner's size:
-// CAB on its real closed signals (computed in CAB), Nihilist on its backtest and real signals.
+// «CAB и Нигилист» (owner 2026-11-04): results only — one tab per signal bot, every way of leading its
+// trades with what it would have given to the deposit at the owner's size (CAB on its real closed
+// signals, computed in CAB; Nihilist on its backtest and real signals). Nothing is chosen here: the
+// strategy, on/off, size and Bitcoin of the owner's account are all in «Мой кабинет».
 import { useState } from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
+import { Link } from "wouter";
 import { Loader2, Play } from "lucide-react";
 import { OwnerStrategyCard } from "@/components/owner-strategy-card";
 import { StrategyCard, StrategySection, NIHILIST_DESCRIPTIONS } from "@/components/StrategyCard";
-import { BtcCard, defaultBtc } from "@/components/BtcCard";
 import { LoadingOrError, useExecutor, type Status } from "@/components/executor-ui";
-import { marginOf, num } from "@/components/form-bits";
+import { num } from "@/components/form-bits";
 import { api, ApiFailure } from "@/lib/subscriber-api";
 
 type Source = "cab" | "nihilist";
@@ -33,8 +33,11 @@ export default function StrategiesPage() {
       {!d ? <LoadingOrError q={ex} /> : (
         <>
           {!d.enabled && <p className="border border-destructive/50 bg-destructive/10 p-3 text-sm text-destructive">Торговый бот выключен: в Secrets нет EXECUTOR_V2=1.</p>}
-          {tab === "cab" ? <CabStrategies d={d} /> : <NihilistStrategies d={d} onSaved={() => void ex.refetch()} />}
-          <BotBtc key={tab} source={tab} d={d} onSaved={() => void ex.refetch()} />
+          <p className="text-sm text-muted-foreground">
+            Здесь только результаты стратегий. Выбрать стратегию, включить торговлю, размер и BTC —{" "}
+            <Link href="/journal/my-bot" className="text-primary underline">в «Мой кабинет»</Link>.
+          </p>
+          {tab === "cab" ? <CabStrategies d={d} /> : <NihilistStrategies d={d} />}
         </>
       )}
     </div>
@@ -47,19 +50,6 @@ function money(d: Status) {
   return { equity, asset };
 }
 const sizeText = (mode: "percent" | "amount", value: number, asset: string) => (mode === "percent" ? `${value}% от баланса` : `${value} ${asset}`);
-
-function BotBtc({ source, d, onSaved }: { source: Source; d: Status; onSaved: () => void }) {
-  const { equity, asset } = money(d);
-  const s = source === "cab" ? d.cab.settings : d.nihilist.settings;
-  return (
-    <BtcCard title={`Биткоин (BTC) в сделках ${source === "cab" ? "CAB" : "Нигилиста"}`}
-      saved={d.btc.settings.find((b) => b.source === source) ?? defaultBtc(source)} maxLeverage={d.btc.maxLeverage}
-      savePath="/journal/executor/btc-settings" onSaved={onSaved}
-      otherMargin={marginOf(s.allocationMode, s.allocationValue, equity)} otherText={sizeText(s.allocationMode, s.allocationValue, asset)}
-      equity={equity} asset={asset} showEnable={false}
-      note={source === "cab" ? "Ведение BTC — по правилам CAB для BTC при любой стратегии." : "Ведение BTC — по выбранной выше стратегии Нигилиста."} />
-  );
-}
 
 type Stats = {
   n: number; open: number; winPct: number; stopPct: number; avg: number; sum: number; maxDd: number;
@@ -106,7 +96,7 @@ type CabReport = {
 const CAB_PERIODS: Array<[number, string]> = [[30, "30 дней"], [60, "60 дней"], [90, "90 дней"], [0, "всё время"]];
 const CAB_EXITS: Array<[string, string]> = [["follow_cab", "как CAB"], ["take5", "+5%"], ["take8", "+8%"], ["take10", "+10%"]];
 
-/** CAB: the owner's strategy picker with results inside each card. */
+/** CAB: every strategy with its results; the chosen one is marked. */
 function CabStrategies({ d }: { d: Status }) {
   const [days, setDays] = useState(60);
   const rep = useQuery({ queryKey: ["cab-report", days], queryFn: () => api<CabReport>(`/journal/executor/cab-report${days ? `?days=${days}` : ""}`), refetchInterval: 300_000 });
@@ -153,19 +143,14 @@ function CabStrategies({ d }: { d: Status }) {
     }
     return <span className="mt-3 block border-t border-border pt-2 text-xs"><ResultLine name="Лонги" r={r.exits[id]} money={m} /></span>;
   };
-  return <OwnerStrategyCard toolbar={toolbar} extra={extra} />;
+  return <OwnerStrategyCard toolbar={toolbar} extra={extra} readOnly />;
 }
 
-function NihilistStrategies({ d, onSaved }: { d: Status; onSaved: () => void }) {
+function NihilistStrategies({ d }: { d: Status }) {
   const rep = useQuery({ queryKey: ["nihilist-report"], queryFn: () => api<{ running: boolean; report: Report | null; historyDays: number }>("/journal/executor/nihilist-report"), refetchInterval: 15_000 });
   const [ds, setDs] = useState<"history" | "live">("history");
   const [msg, setMsg] = useState<{ text: string; bad: boolean } | null>(null);
   const run = useMutation({ mutationFn: () => api("/journal/executor/nihilist-report/run", { method: "POST" }), onSuccess: () => void rep.refetch(), onError: (e) => setMsg({ text: e instanceof ApiFailure ? e.message : "Не удалось запустить", bad: true }) });
-  const pick = useMutation({
-    mutationFn: (strategy: string) => api("/journal/executor/source-settings/nihilist", { method: "POST", body: { strategy } }),
-    onSuccess: () => { setMsg({ text: "Сохранено. Действует для новых сделок; открытые закрываются по своей стратегии.", bad: false }); onSaved(); },
-    onError: (e) => setMsg({ text: e instanceof ApiFailure ? e.message : "Не удалось сохранить", bad: true }),
-  });
   const current = d.nihilist.settings.strategy;
   const strategies = d.nihilist.strategies;
   const report = rep.data?.report ?? null;
@@ -207,8 +192,7 @@ function NihilistStrategies({ d, onSaved }: { d: Status; onSaved: () => void }) 
       <div className="grid gap-3 sm:grid-cols-2">
         {strategies.map((st, i) => (
           <StrategyCard key={st.id} index={i + 1} label={st.label} description={NIHILIST_DESCRIPTIONS[st.id]}
-            saved={current === st.id} active={current === st.id} disabled={pick.isPending}
-            onClick={() => { if (current !== st.id) pick.mutate(st.id); }}>
+            saved={current === st.id} active={current === st.id} readOnly>
             {dataset && (
               <span className="mt-3 block space-y-1 border-t border-border pt-2 text-xs">
                 {SIDES.map(([g, name]) => <ResultLine key={g} name={name} r={dataset.groups[g]?.find((x) => x.id === st.id)?.stats} money={m} />)}

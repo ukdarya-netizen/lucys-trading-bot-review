@@ -1,4 +1,4 @@
-// Bitcoin in the trades of one signal bot (owner 2026-11-03): part of that bot's strategy page,
+// Bitcoin in the trades of one signal bot (owner 2026-11-03): in the owner's and subscribers' cabinets,
 // set separately for CAB and for Nihilist — on/off, leverage (50x unless changed), own size.
 import { useEffect, useState } from "react";
 import { useMutation } from "@tanstack/react-query";
@@ -16,7 +16,7 @@ export function BtcCard({ title, saved, maxLeverage, savePath, onSaved, otherMar
   title: string; saved: BtcSettings; maxLeverage: number; savePath: string; onSaved: () => void;
   /** Margin of other coins of this bot, for «как у других». */
   otherMargin: number | null; otherText: string; equity: number | null; asset: string; note?: string;
-  /** Owner's «CAB и Нигилист»: no on/off here (it is in «Мой кабинет»). */
+  /** false: no on/off switch in the card. */
   showEnable?: boolean;
 }) {
   const [b, setB] = useState(saved);
