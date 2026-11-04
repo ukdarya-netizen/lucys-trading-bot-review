@@ -1,8 +1,11 @@
 /**
  * Who trades (owner 2026-11-02 rewrite). Always isolated margin, 10x.
- *   owner-vst      — the owner's BingX key (BINGX_API_KEY / BINGX_API_SECRET)
- *                    on the VST demo; size 1% of equity per trade; strategy
- *                    from owner_trading_strategy (default take5);
+ *   the owner's main account — chosen in «Мой кабинет» (owner 2026-11-04, ex_owner_account):
+ *     owner-paper  — PAPER: simulated exchange with BingX prices (paper.ts), no key;
+ *     owner-vst    — VST demo with the key saved in the cabinet, else BINGX_API_KEY /
+ *                    BINGX_API_SECRET from Secrets (unless EXECUTOR_OWNER_VST=0);
+ *     owner-real   — REAL money, only with the key saved in the cabinet;
+ *   strategy from owner_trading_strategy, size per source from «Мой кабинет»;
  *   sub-<id>-vst   — approved subscribers with trading started on VST and a
  *                    saved key; their size and strategy from the cabinet
  *                    (only with EXECUTOR_SUBSCRIBERS=1).
@@ -22,6 +25,8 @@ export type Account = {
   /** Signals before this moment are not traded by this account. */
   startedAt: number;
   subscriberId: number | null;
+  /** PAPER: orders go to the simulated exchange (paper.ts). */
+  paper?: boolean;
   /** Signal sources this account trades (a subscriber picks CAB, Nihilist or both; the owner: both). */
   sources: Set<string>;
 };
@@ -45,18 +50,42 @@ async function ownerStrategyRow(): Promise<{ strategy: string; pattern_exit: str
   }
 }
 
-export async function loadAccounts(): Promise<Account[]> {
-  const out: Account[] = [];
+export type OwnerMode = "paper" | "vst" | "real";
+export type OwnerAccountRow = { mode: OwnerMode; api_key_encrypted: string | null; api_secret_encrypted: string | null };
+export async function ownerAccountRow(): Promise<OwnerAccountRow | null> {
+  try {
+    const r = await pool.query("SELECT mode, api_key_encrypted, api_secret_encrypted FROM ex_owner_account WHERE id = 1");
+    return r.rows[0] ?? null;
+  } catch {
+    return null; // table not created yet: Secrets
+  }
+}
+
+/** The owner's main account as set in «Мой кабинет»; without a choice there — the VST key from Secrets. */
+export async function ownerAccount(row: OwnerAccountRow | null, strategy: Strategy): Promise<Account | null> {
+  const base = { allocation: { mode: "percent" as const, value: 1 }, strategy, startedAt: 0, subscriberId: null, sources: new Set(["cab", "nihilist"]) };
+  if (row?.mode === "paper") return { ...base, id: "owner-paper", label: "PAPER", env: "vst", key: "paper", secret: "paper", paper: true };
+  if (row && row.api_key_encrypted && row.api_secret_encrypted && (row.mode === "vst" || row.mode === "real")) {
+    try {
+      return {
+        ...base, id: `owner-${row.mode}`, label: row.mode === "real" ? "BingX REAL" : "BingX VST", env: row.mode,
+        key: decryptSecret(row.api_key_encrypted), secret: decryptSecret(row.api_secret_encrypted),
+      };
+    } catch {
+      return null; // SUBSCRIBER_KEYS_SECRET changed: the key must be entered again
+    }
+  }
+  if (row?.mode === "real") return null; // REAL needs its key saved in the cabinet
   const key = process.env.BINGX_API_KEY?.trim();
   const secret = process.env.BINGX_API_SECRET?.trim();
-  if (key && secret && process.env.EXECUTOR_OWNER_VST !== "0") {
-    out.push({
-      id: "owner-vst", label: "BingX VST", env: "vst", key, secret,
-      allocation: { mode: "percent", value: 1 },
-      strategy: resolveStrategy(await ownerStrategyRow()),
-      startedAt: 0, subscriberId: null, sources: new Set(["cab", "nihilist"]),
-    });
-  }
+  if (key && secret && process.env.EXECUTOR_OWNER_VST !== "0") return { ...base, id: "owner-vst", label: "BingX VST", env: "vst", key, secret };
+  return null;
+}
+
+export async function loadAccounts(): Promise<Account[]> {
+  const out: Account[] = [];
+  const owner = await ownerAccount(await ownerAccountRow(), resolveStrategy(await ownerStrategyRow()));
+  if (owner) out.push(owner);
   // Subscribers join only when the owner turns them on (EXECUTOR_SUBSCRIBERS=1).
   if (process.env.EXECUTOR_SUBSCRIBERS !== "1") return out;
   try {

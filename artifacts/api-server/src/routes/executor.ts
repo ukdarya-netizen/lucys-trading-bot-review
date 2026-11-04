@@ -2,6 +2,7 @@ import { Router, type IRouter } from "express";
 import { requireJournalOwner, requireJournalSession } from "../middlewares/journalAccess";
 import { cabOrigin, executorHealth, executorStatus, executorTradeEvents, saveNihilistSettings, saveSourceSettingsFrom } from "../executor";
 import { saveBtcSettings } from "../executor/store";
+import { listSignals, ownerAccountInfo, saveOwnerAccount } from "../executor/owner-account";
 
 /** Owner: the new executor's accounts, trades and events (owner 2026-11-02). */
 const router: IRouter = Router();
@@ -34,6 +35,22 @@ router.post("/journal/executor/source-settings/:source", requireJournalSession, 
   const out = await saveSourceSettingsFrom(source, req.body);
   if (!out.ok) { res.status(400).json({ error: { code: out.code, message: "Неверные настройки" } }); return; }
   res.json(out.settings);
+});
+// The owner's main account: PAPER / VST / REAL and its BingX key (owner 2026-11-04).
+router.get("/journal/executor/owner-account", requireJournalSession, requireJournalOwner, async (_req, res) => {
+  res.setHeader("Cache-Control", "no-store");
+  res.json(await ownerAccountInfo());
+});
+router.post("/journal/executor/owner-account", requireJournalSession, requireJournalOwner, async (req, res) => {
+  res.setHeader("Cache-Control", "no-store");
+  const out = await saveOwnerAccount(req.body);
+  if (!out.ok) { res.status(out.status).json({ error: { code: "owner_account", message: out.message } }); return; }
+  res.json({ ...out.info, equity: out.equity });
+});
+// Every received signal and what each account did with it (owner 2026-11-04).
+router.get("/journal/executor/signals", requireJournalSession, requireJournalOwner, async (req, res) => {
+  res.setHeader("Cache-Control", "no-store");
+  res.json({ signals: await listSignals(Number(req.query.days ?? 3)) });
 });
 router.post("/journal/executor/btc-settings", requireJournalSession, requireJournalOwner, async (req, res) => {
   res.setHeader("Cache-Control", "no-store");

@@ -10,6 +10,7 @@ import TradeOverview from "./TradeOverview";
 import TradePositions from "./TradePositions";
 import TradeHistory from "./TradeHistory";
 import StrategiesPage from "./StrategiesPage";
+import SignalsPage from "./SignalsPage";
 import BotHealth from "./BotHealth";
 import { MainAccountToggles } from "@/components/SourceToggles";
 
@@ -17,6 +18,7 @@ import { MainAccountToggles } from "@/components/SourceToggles";
 // show both with one switch. The old bot's pages are gone from the site (owner: not needed).
 const NAV_ITEMS = [
   { group: "Торговля", href: "/journal/overview", label: "Обзор", short: "Обзор", sub: "результат CAB и Нигилиста", icon: LayoutDashboard },
+  { group: "Торговля", href: "/journal/signals", label: "Сигналы", short: "Сигналы", sub: "что пришло и что сделал бот", icon: Activity },
   { group: "Торговля", href: "/journal/positions", label: "Позиции", short: "Позиции", sub: "открытые сейчас", icon: Crosshair },
   { group: "Торговля", href: "/journal/trades", label: "История", short: "История", sub: "закрытые и не открытые", icon: History },
   { group: "Управление", href: "/journal/bots", label: "CAB и Нигилист", short: "Боты", sub: "результаты стратегий", icon: SlidersHorizontal },
@@ -153,6 +155,7 @@ export default function JournalLayout() {
 
           <Switch>
              <Route path="/journal/overview" component={TradeOverview} />
+             <Route path="/journal/signals" component={SignalsPage} />
              <Route path="/journal/positions" component={TradePositions} />
              <Route path="/journal/trades" component={TradeHistory} />
              <Route path="/journal/bots" component={StrategiesPage} />

@@ -104,6 +104,25 @@ export function ensureExecutorTables(): Promise<void> {
         subscribers boolean NOT NULL DEFAULT false,
         updated_at timestamptz NOT NULL DEFAULT now()
       )`);
+    // Owner 2026-11-04: the main account set in «Мой кабинет» — PAPER / VST / REAL, its key (encrypted).
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS ex_owner_account (
+        id integer PRIMARY KEY,
+        mode text NOT NULL DEFAULT 'vst',
+        api_key_encrypted text,
+        api_secret_encrypted text,
+        key_last4 text,
+        verified_at timestamptz,
+        error text,
+        updated_at timestamptz NOT NULL DEFAULT now()
+      )`);
+    // Owner 2026-11-04: the PAPER account's simulated exchange (balance, positions, orders).
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS ex_paper_state (
+        id integer PRIMARY KEY,
+        state jsonb NOT NULL,
+        updated_at timestamptz NOT NULL DEFAULT now()
+      )`);
     // Owner 2026-11-03: Nihilist open to subscribers (a setting saved before this decision had it closed by default).
     await pool.query(`UPDATE ex_source_settings SET subscribers = true WHERE source = 'nihilist' AND NOT subscribers AND updated_at < '2026-11-03T08:10:00Z'`);
     await pool.query("CREATE INDEX IF NOT EXISTS ex_trades_status ON ex_trades (account_id, status)");

@@ -8,6 +8,10 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import { pool } from "@workspace/db";
 import { createBingX } from "./bingx";
 import { loadAccounts } from "./accounts";
+import { createPaperFetch } from "./paper";
+
+/** One simulated exchange for the PAPER account (its state lives in ex_paper_state). */
+let paperFetch: ReturnType<typeof createPaperFetch> | null = null;
 import { REASON_TEXT, createExecutor, type Executor } from "./engine";
 import { closeReasonText } from "./texts";
 import { createIntakeHandler } from "./intake";
@@ -98,7 +102,9 @@ export async function startExecutor(log: (msg: string, extra?: unknown) => void)
   await ensureExecutorTables();
   executor = createExecutor({
     loadAccounts,
-    bingx: (a) => createBingX({ env: a.env, key: a.key, secret: a.secret }),
+    bingx: (a) => (a.paper
+      ? createBingX({ env: "vst", key: a.key, secret: a.secret, host: "https://paper.local", fetchImpl: (paperFetch ??= createPaperFetch()) })
+      : createBingX({ env: a.env, key: a.key, secret: a.secret })),
     send: telegramSender,
     log,
   });
