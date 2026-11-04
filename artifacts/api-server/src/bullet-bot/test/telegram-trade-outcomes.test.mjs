@@ -1,0 +1,331 @@
+import assert from "node:assert/strict";
+import { test } from "node:test";
+import {
+  formatVstTradeOutcome,
+  vstTradeOutcome,
+  TECHNICAL_TELEGRAM_ALERTS_ENABLED,
+} from "../telegram-trade-outcomes.mjs";
+import { createVstTelegramNotifier } from "../vst-telegram.mjs";
+
+const event = (kind, extra = {}) => ({ kind, symbol: "WOOUSDT", ...extra });
+
+test("Telegram reports concise confirmed outcomes without inventing a closure reason", () => {
+  for (const [row, text] of [
+    [event("vst_entry_verified"), "Позиция открыта."],
+    [event("vst_entry_margin_top_up_pending"), "Позиция открыта."],
+    [event("vst_signal_rejected"), "Позиция не открыта.\nПричина: причина не указана"],
+    [event("vst_worker_error", {
+      detail: { reason: "entry_unverified_symbol_flat_after_timeout" },
+    }), "Позиция не открыта.\nПричина: ордер не исполнен, позиции на бирже нет"],
+    [event("vst_action_reconciled", {
+      request: { operation: "close_leg", nextPolicy: { status: "closed" } },
+    }), "Позиция закрыта."],
+    [event("source_exit_completed", { detail: { outcome: "closed" } }),
+      "Позиция закрыта."],
+    [event("vst_triggered_stop_verified"), "Сработал стоп-лосс."],
+    [event("source_exit_completed", {
+      detail: { outcome: "closed", detail: { closureOrigin: "already_committed_protective_stop" } },
+    }), "Сработал стоп-лосс."],
+  ]) {
+    assert.equal(formatVstTradeOutcome(row), `BingX VST · WOOUSDT\n${text}`);
+  }
+});
+
+test("pending, technical and unknown events cannot masquerade as trade outcomes", () => {
+  assert.equal(TECHNICAL_TELEGRAM_ALERTS_ENABLED, false);
+  for (const kind of [
+    "vst_margin_mode_preparation_verified", "vst_margin_top_up_verified",
+    "vst_margin_top_up_funded_but_unsafe", "vst_margin_top_up_unconfirmed",
+    "vst_stop_protection_degraded", "vst_position_management_diagnostic",
+    "vst_pre_runner_close_retry_limit", "vst_action_unresolved",
+    "vst_worker_error", "vst_signal_status_changed", "future_event",
+  ]) {
+    const row = event(kind, {
+      detail: { reason: "entry_result_not_verified", operation: "entry" },
+    });
+    assert.equal(vstTradeOutcome(row), null, kind);
+    assert.equal(formatVstTradeOutcome(row), null, kind);
+  }
+  assert.equal(formatVstTradeOutcome(event("vst_entry_verified", { symbol: null })), null);
+  assert.equal(vstTradeOutcome(event("vst_worker_error", {
+    detail: { reason: "entry_abandoned_confirmed_flat_account" },
+  })), null, "flat now does not prove entry never filled");
+  assert.equal(vstTradeOutcome(event("vst_worker_error", {
+    detail: { reason: "raise_stop_abandoned_confirmed_flat_account", operation: "raise_stop" },
+  })), null, "a post-entry operation failure is not a missed entry");
+  assert.equal(vstTradeOutcome(event("source_exit_completed", {
+    detail: { outcome: "cancelled_unentered" },
+  })), null, "no confirmed entry is not proof of no execution");
+  assert.equal(vstTradeOutcome(event("vst_action_reconciled", {
+    request: { operation: "close_leg", nextPolicy: { status: "open" } },
+  })), null, "a partial fill must not be described as a full close");
+  assert.equal(vstTradeOutcome(event("vst_impulse_triggered_stop_verified", {
+    detail: { residualQuantity: 12 },
+  })), null);
+});
+
+test("confirmed close paths are covered without calling a market close a stop loss", () => {
+  for (const kind of [
+    "vst_impulse_sole_split_leg_closed", "vst_impulse_full_split_position_closed",
+    "vst_impulse_flat_close_cleanup_pending", "vst_source_exit_closed",
+    "vst_source_exit_flat_cleanup_pending", "exchange_history_provenance",
+  ]) assert.equal(vstTradeOutcome(event(kind)), "closed", kind);
+  assert.equal(vstTradeOutcome(event("vst_protected_strategy_exit_verified", {
+    request: { nextPolicy: { status: "closed" } },
+  })), "closed");
+});
+
+test("source cancellation stays cancellation through close, cleanup and restart reconciliation", () => {
+  const sourceEvidence = { sourceStatus: "cancelled", sourceAction: "review", reason: "source_withdrawal" };
+  for (const row of [
+    event("vst_source_exit_closed", { detail: { sourceEvidence } }),
+    event("vst_source_exit_flat_cleanup_pending", { detail: { sourceEvidence } }),
+    event("source_exit_completed", { detail: { outcome: "closed", evidence: sourceEvidence } }),
+    event("source_exit_completed", { detail: { outcome: "closed", detail: { sourceEvidence } } }),
+    event("vst_action_reconciled", { request: {
+      operation: "close_leg", nextPolicy: { status: "closed" }, sourceExit: { evidence: sourceEvidence },
+    } }),
+  ]) assert.equal(formatVstTradeOutcome({ ...row, symbol: "IDUSDT" }),
+    "BingX VST · IDUSDT\nПозиция закрыта: сигнал отменён.");
+  assert.equal(vstTradeOutcome(event("source_exit_completed", {
+    detail: { outcome: "pending", evidence: sourceEvidence },
+  })), null);
+  assert.equal(vstTradeOutcome(event("vst_action_reconciled", {
+    request: { operation: "close_leg", nextPolicy: { status: "open" }, sourceExit: { evidence: sourceEvidence } },
+  })), null);
+  assert.equal(formatVstTradeOutcome(event("source_exit_completed", {
+    detail: { outcome: "closed", evidence: sourceEvidence,
+      detail: { closureOrigin: "already_committed_protective_stop" } },
+  })), "BingX VST · WOOUSDT\nСработал стоп-лосс.");
+});
+
+test("a confirmed five-percent take is distinguished from cancellation and an unknown close reason", () => {
+  const sourceEvidence = { reason: "fixed_price_take_profit_5pct", rule: "full_take_5pct" };
+  for (const row of [
+    event("vst_source_exit_closed", { detail: { sourceEvidence } }),
+    event("source_exit_completed", { detail: { outcome: "closed", evidence: sourceEvidence } }),
+  ]) assert.equal(formatVstTradeOutcome(row), "BingX VST · WOOUSDT\nПозиция зафиксирована: тейк +5%.");
+  assert.equal(formatVstTradeOutcome(event("vst_source_exit_closed")),
+    "BingX VST · WOOUSDT\nПозиция закрыта.");
+});
+
+test("WOO lifecycle sends an opening and final result, never margin or reconciliation text", async () => {
+  const rows = [
+    event("vst_margin_mode_preparation_verified"),
+    event("vst_action_unresolved", { detail: { reason: "entry_result_not_verified", operation: "entry" } }),
+    event("vst_entry_margin_top_up_pending"),
+    event("vst_margin_top_up_verified"),
+    event("vst_entry_verified"),
+    event("vst_action_reconciled", { request: { operation: "raise_stop" } }),
+    event("vst_source_exit_closed", { detail: {
+      sourceEvidence: { sourceStatus: "cancelled", sourceAction: "review", reason: "source_withdrawal" },
+    } }),
+    event("source_exit_completed", { detail: {
+      outcome: "closed", evidence: { sourceStatus: "cancelled", sourceAction: "review", reason: "source_withdrawal" },
+    } }),
+  ].map((row, index) => ({
+    ...row, id: String(index), source_signal_id: "woo-test",
+    body: { symbol: row.symbol }, created_at: new Date(),
+  }));
+  const acknowledged = new Set();
+  const messages = [];
+  const pool = {
+    async connect() {
+      return {
+        async query(sql, params) {
+          if (sql.includes("pg_try_advisory_lock")) return { rows: [{ acquired: true }] };
+          if (sql.includes("pg_advisory_unlock")) return { rows: [{ released: true }] };
+          if (sql.includes("FROM vst_events e")) return {
+            rows: rows.filter(row => !acknowledged.has(row.id)),
+          };
+          if (sql.includes("FROM vst_events prior")) return {
+            rows: rows.filter(row => acknowledged.has(row.id) &&
+              row.source_signal_id === params[0] && Number(row.id) < Number(params[1])),
+          };
+          if (sql.includes("SET telegram_sent_at")) {
+            acknowledged.add(params[0]);
+            return { rows: [] };
+          }
+          throw new Error("unexpected SQL");
+        },
+        release() {},
+      };
+    },
+  };
+  const notifier = createVstTelegramNotifier({
+    pool, token: "123:TEST_TOKEN", chatId: "-123",
+    fetcher: async (_url, options) => {
+      messages.push(JSON.parse(options.body).text);
+      return { ok: true, json: async () => ({ ok: true }) };
+    },
+  });
+  for (let index = 0; index < 4; index++) await notifier.tick();
+  assert.deepEqual(messages, [
+    "BingX VST · WOOUSDT\nПозиция открыта.",
+    "BingX VST · WOOUSDT\nПозиция закрыта: сигнал отменён.",
+  ]);
+  assert.equal(acknowledged.size, rows.length);
+});
+
+test("not-opened message always carries a readable reason", () => {
+  const text = (reason, kind = "vst_signal_rejected", extra = {}) =>
+    formatVstTradeOutcome(event(kind, { detail: { reason, ...extra } }));
+  assert.equal(text("insufficient_available_vst,below_minimum_notional"),
+    "BingX VST · WOOUSDT\nПозиция не открыта.\nПричина: недостаточно свободных VST; сумма меньше минимальной");
+  assert.equal(text("vst_symbol_currently_offline:paused"),
+    "BingX VST · WOOUSDT\nПозиция не открыта.\nПричина: монета сейчас недоступна на BingX VST");
+  assert.equal(text("some_new_code"),
+    "BingX VST · WOOUSDT\nПозиция не открыта.\nПричина: some_new_code");
+  assert.equal(text("vst_order_rejected", "vst_worker_error", { operation: "entry" }),
+    "BingX VST · WOOUSDT\nПозиция не открыта.\nПричина: биржа отклонила ордер");
+  assert.equal(vstTradeOutcome(event("vst_worker_error", {
+    detail: { reason: "vst_order_rejected", operation: "close_leg" },
+  })), null, "a rejected close is not a rejected entry");
+});
+
+test("a touched +5% take that is not closed gets two distinct, once-only notices", () => {
+  const detail = { entryPrice: "0.009989999999999999", observedPrice: "0.01053",
+    reason: "source_exit_same_symbol_intent_unresolved" };
+  assert.equal(formatVstTradeOutcome(event("vst_full_take_close_delayed", { detail })),
+    "BingX VST · WOOUSDT\nЦена достигла +5%, но позиция ещё не закрыта. Бот продолжает закрывать её. Стоп-лосс на бирже сохраняется.\n" +
+    "Вход 0.00999 · цена 0.01053\nПричина: по монете не завершена предыдущая операция, бот сверяет её с биржей");
+  const stuck = formatVstTradeOutcome(event("vst_full_take_close_stuck", {
+    detail: { ...detail, reason: "full_take_close_not_attempted" } }));
+  assert.match(stuck, /Закройте её вручную на BingX VST/);
+  assert.match(stuck, /Причина: цикл бота ещё не дошёл до закрытия/);
+  assert.notEqual(vstTradeOutcome(event("vst_full_take_close_delayed")),
+    vstTradeOutcome(event("vst_full_take_close_stuck")), "separate repeat keys");
+  assert.equal(vstTradeOutcome(event("vst_full_take_touched")), null, "a touch alone is not posted");
+});
+
+test("a restart does not repeat an opening already posted for the same signal", async () => {
+  const rows = [
+    event("vst_entry_margin_top_up_pending"),
+    event("vst_entry_verified"),
+  ].map((row, index) => ({
+    ...row, id: String(index + 1), source_signal_id: "id-signal",
+    body: { symbol: row.symbol }, created_at: new Date(),
+  }));
+  const acknowledged = new Set();
+  const messages = [];
+  const pool = {
+    async connect() {
+      return {
+        async query(sql, params) {
+          if (sql.includes("pg_try_advisory_lock")) return { rows: [{ acquired: true }] };
+          if (sql.includes("pg_advisory_unlock")) return { rows: [{ released: true }] };
+          if (sql.includes("FROM vst_events prior")) return {
+            rows: rows.filter(row => acknowledged.has(row.id) &&
+              row.source_signal_id === params[0] && Number(row.id) < Number(params[1])),
+          };
+          if (sql.includes("FROM vst_events e")) return {
+            rows: rows.filter(row => !acknowledged.has(row.id)),
+          };
+          if (sql.includes("SET telegram_sent_at")) { acknowledged.add(params[0]); return { rows: [] }; }
+          throw new Error("unexpected SQL");
+        },
+        release() {},
+      };
+    },
+  };
+  const make = () => createVstTelegramNotifier({
+    pool, token: "123:TEST_TOKEN", chatId: "-123",
+    fetcher: async (_url, options) => {
+      messages.push(JSON.parse(options.body).text);
+      return { ok: true, json: async () => ({ ok: true }) };
+    },
+  });
+  await make().tick();
+  await make().tick(); // a fresh notifier = a restart; its memory is empty
+  assert.deepEqual(messages, ["BingX VST · WOOUSDT\nПозиция открыта."]);
+  assert.equal(acknowledged.size, 2);
+});
+
+test("a quarantined position is reported once in plain text", () => {
+  assert.equal(formatVstTradeOutcome(event("vst_position_management_quarantined", { detail: { diagnosticRef: "x" } })),
+    "BingX VST · WOOUSDT\nБот не может сопровождать эту позицию из-за ошибки. Стоп-лосс на бирже стоит, тейк +5% отслеживается. Новые сигналы по другим монетам открываются.");
+});
+
+test("a position verified flat outside the bot is reported once, not also as a bot close", () => {
+  assert.equal(formatVstTradeOutcome(event("vst_external_close_verified", { detail: { observations: 3 } })),
+    "BingX VST · WOOUSDT\nПозиция закрыта. Причина закрытия не подтверждена.");
+  assert.equal(vstTradeOutcome(event("source_exit_completed", {
+    detail: { outcome: "closed", detail: { closureOrigin: "external_close_verified_flat" } },
+  })), null);
+});
+
+test("every pre-entry failure reaches Telegram as not opened, with the exchange answer", () => {
+  for (const [detail, reasonText] of [
+    [{ reason: "prepare_margin_mode_abandoned_confirmed_flat_account", operation: "prepare_margin_mode" },
+      "не удалось переключить маржу монеты на изолированную"],
+    [{ reason: "isolated_margin_preparation_failed", operation: "prepare_margin_mode" },
+      "не удалось переключить маржу монеты на изолированную"],
+    [{ reason: "isolated_margin_preparation_rejected", operation: "prepare_margin_mode" },
+      "не удалось переключить маржу монеты на изолированную"],
+    [{ reason: "set_isolated_leverage_abandoned_confirmed_flat_account", operation: "set_isolated_leverage" },
+      "не удалось выставить плечо по монете"],
+    [{ reason: "vst_order_rejected", operation: "prepare_margin_mode" }, "биржа отклонила ордер"],
+    [{ reason: "bingx_vst_planning_failed", stage: "before_entry" }, "bingx_vst_planning_failed"],
+  ]) {
+    const row = event("vst_worker_error", { symbol: "POLYXUSDT", detail });
+    assert.equal(vstTradeOutcome(row), "not_opened", detail.reason);
+    assert.equal(formatVstTradeOutcome(row),
+      `BingX VST · POLYXUSDT\nПозиция не открыта.\nПричина: ${reasonText}`);
+  }
+  const withAnswer = event("vst_worker_error", { symbol: "POLYXUSDT", detail: {
+    reason: "isolated_margin_preparation_failed", operation: "prepare_margin_mode",
+    errorMessage: "code 80012 · service unavailable",
+  } });
+  assert.match(formatVstTradeOutcome(withAnswer), /Ответ: code 80012 · service unavailable$/);
+});
+
+test("an expired signal says what kept the bot from entering", () => {
+  const row = event("vst_signal_rejected", { symbol: "TRBUSDT", detail: {
+    reason: "signal_expired_before_entry_reservation", blockedBy: "capability_read_failed",
+  } });
+  assert.equal(formatVstTradeOutcome(row), [
+    "BingX VST · TRBUSDT", "Позиция не открыта.", "Причина: сигнал устарел до входа",
+    "Бот не мог начать вход: BingX не подтвердил состояние счёта (ошибка чтения биржи)",
+  ].join("\n"));
+});
+
+test("a BingX rate-limit refusal is named in plain words", () => {
+  const row = event("vst_worker_error", { symbol: "OPNUSDT", detail: {
+    reason: "BingX request failed GET openApiswapv2trademarginType, HTTP 200, code 100410, msg: code:100410:The endpoint trigger freq",
+    stage: "before_entry",
+  } });
+  assert.match(formatVstTradeOutcome(row), /Причина: BingX временно ограничил частые запросы/);
+});
+
+test("cabinet notifier prefixes its label and uses its own delivery lock", async () => {
+  const row = { ...event("vst_entry_verified"), id: "1", source_signal_id: "id-cab",
+    body: { symbol: "WOOUSDT" }, created_at: new Date() };
+  const acknowledged = new Set();
+  const messages = [];
+  const locks = [];
+  const pool = {
+    async connect() {
+      return {
+        async query(sql, params) {
+          if (sql.includes("pg_try_advisory_lock")) { locks.push(params[1]); return { rows: [{ acquired: true }] }; }
+          if (sql.includes("pg_advisory_unlock")) return { rows: [{ released: true }] };
+          if (sql.includes("FROM vst_events prior")) return { rows: [] };
+          if (sql.includes("FROM vst_events e")) return { rows: acknowledged.has("1") ? [] : [row] };
+          if (sql.includes("SET telegram_sent_at")) { acknowledged.add(params[0]); return { rows: [] }; }
+          throw new Error("unexpected SQL");
+        },
+        release() {},
+      };
+    },
+  };
+  const notifier = createVstTelegramNotifier({
+    pool, token: "123:TEST_TOKEN", chatId: "-123", label: "Кабинет · Дарья", lockId: 100_007,
+    fetcher: async (_url, options) => {
+      messages.push(JSON.parse(options.body).text);
+      return { ok: true, json: async () => ({ ok: true }) };
+    },
+  });
+  await notifier.tick();
+  assert.deepEqual(messages, ["Кабинет · Дарья · BingX VST · WOOUSDT\nПозиция открыта."]);
+  assert.deepEqual(locks, [100_007]);
+});

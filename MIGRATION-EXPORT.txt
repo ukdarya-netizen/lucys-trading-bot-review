@@ -1,0 +1,13 @@
+FULL CURRENT APPLICATION SOURCE EXPORT
+
+This branch is a snapshot of the Replit working files, not its internal checkpoint history.
+All application source, tests, dependencies/lockfile, schema definitions, scripts,
+configuration, documentation and application images are included.
+
+Excluded: environment secret values, database dumps, production reports,
+private uploads/screenshots, internal handoff/memory, caches, dependencies and build output.
+The .replit configuration is retained except for all project-specific userenv sections.
+Transfer required configuration through Secrets/settings, never through GitHub.
+
+Read docs/migration/START-HERE.txt before running this snapshot in a new project.
+No database, exchange, secret or deployment operations were performed for this export.

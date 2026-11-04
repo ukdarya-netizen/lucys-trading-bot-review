@@ -1,0 +1,366 @@
+/**
+ * BingX USDT perpetual client for the executor (owner 2026-11-02: rewrite).
+ * One client per account (key) and environment: "vst" (demo host) or "real".
+ * Hedge mode: positionSide LONG / SHORT. Signing as BingX documents it: keys
+ * sorted, values unencoded in the signed text, URL-encoded in the query.
+ * Big order/position ids are kept as strings (JSON numbers lose precision).
+ * Requests of one account start through its own small queue: entries first,
+ * at most one request start every MIN_GAP_MS (answers are awaited in
+ * parallel). Accounts never wait on each other.
+ *
+ * Rate limit (owner 2026-11-03: two signals at once → 100410 on openOrders, the
+ * protection broke off): BingX names the moment an endpoint is unblocked; every
+ * request to it waits until then, and the refused one is sent again until it passes
+ * (blocks under 30 s each, up to 2 minutes in all, waiters spread at random). A refusal for rate is its own kind — never read as
+ * «order not found» or «already cancelled». Open orders of a symbol are kept for
+ * 5 s (cleared by any order placed or cancelled on it): stop and take checks in a
+ * row ask BingX once, and a reconcile pass asks once for all symbols.
+ */
+import { createHmac } from "node:crypto";
+
+export type Env = "vst" | "real";
+export const HOSTS: Record<Env, string> = {
+  vst: "https://open-api-vst.bingx.com",
+  real: "https://open-api.bingx.com",
+};
+const MIN_GAP_MS = 120;
+const TIMEOUT_MS = 8_000;
+
+export class BingXError extends Error {
+  constructor(message: string, public code: number | null, public kind: "exchange" | "network" | "timeout" | "http" | "rate") {
+    super(message);
+  }
+  /** The request may or may not have reached the exchange. */
+  get ambiguous(): boolean { return this.kind === "network" || this.kind === "timeout"; }
+}
+
+export type Contract = { symbol: string; quantityPrecision: number; pricePrecision: number; minQty: number; minNotional: number };
+export type Position = {
+  symbol: string; positionId: string; positionSide: "LONG" | "SHORT"; qty: number; avgPrice: number;
+  liquidationPrice: number | null; margin: number | null; minIncreaseMargin: number; leverage: number | null; isolated: boolean | null;
+};
+export type Order = {
+  orderId: string; clientOrderId: string | null; symbol: string; side: string; positionSide: string; type: string;
+  status: string; qty: number; executedQty: number; avgPrice: number; stopPrice: number | null; time: number; updateTime: number;
+};
+export type Priority = "entry" | "protect" | "normal";
+
+/** BingX "BTC-USDT"; signals use "BTCUSDT". */
+export const exSymbol = (s: string) => (s.includes("-") ? s : s.replace(/USDT$/, "-USDT"));
+
+/**
+ * Coins quoted per 1000 / 1 000 000 units (owner 2026-11-03: CAB sent 1000000MOG, BingX
+ * has it with another number of zeros; LUNC too). Multiplier prefix of a base asset:
+ * "1000000MOG" → 1e6 × MOG, "1MBABYDOGE" → 1e6, "MOG" → 1.
+ */
+const MULTS = [1, 10, 100, 1_000, 10_000, 100_000, 1_000_000, 10_000_000, 100_000_000];
+export function splitMultiplier(base: string): { mult: number; core: string } {
+  const m = /^(10+)(?=[A-Z])/.exec(base);
+  if (m && MULTS.includes(Number(m[1]))) return { mult: Number(m[1]), core: base.slice(m[1]!.length) };
+  if (/^1M(?=[A-Z]{2})/.test(base)) return { mult: 1_000_000, core: base.slice(2) };
+  return { mult: 1, core: base };
+}
+/** BingX's contract for a source symbol and the price factor (BingX price = source price × factor), or null. */
+export function mapSymbol(symbol: string, listed: (exSym: string) => boolean): { symbol: string; factor: number } | null {
+  const ex = exSymbol(symbol);
+  if (listed(ex)) return { symbol, factor: 1 };
+  const base = ex.replace(/-USDT$/, "");
+  const { mult: srcMult, core } = splitMultiplier(base);
+  const names = (m: number) => (m === 1 ? [core] : m === 1_000_000 ? [`${m}${core}`, `1M${core}`] : [`${m}${core}`]);
+  // Nearest multiplier first (10× before 1000×), never the same symbol again.
+  const order = [...MULTS].sort((a, b) => Math.abs(Math.log10(a / srcMult)) - Math.abs(Math.log10(b / srcMult)));
+  for (const m of order) for (const n of names(m)) {
+    if (`${n}-USDT` === ex || !listed(`${n}-USDT`)) continue;
+    return { symbol: `${n}USDT`, factor: m / srcMult };
+  }
+  return null;
+}
+export const plainSymbol = (s: string) => s.replace("-", "");
+
+const num = (v: unknown): number => (v === null || v === undefined || v === "" ? NaN : Number(v));
+const str = (v: unknown): string => (v === null || v === undefined ? "" : String(v));
+
+/** Keeps 16+ digit integers (ids) exact. */
+export function parseLossless(text: string): any {
+  return JSON.parse(text.replace(/("(?:orderId|orderID|positionId|positionID|id)"\s*:\s*)(-?\d{16,})/g, '$1"$2"'));
+}
+
+export function decimalAt(value: number, precision: number, mode: "floor" | "ceil" | "round" = "round"): string {
+  const f = 10 ** precision;
+  const scaled = value * f;
+  const r = mode === "floor" ? Math.floor(scaled + 1e-9) : mode === "ceil" ? Math.ceil(scaled - 1e-9) : Math.round(scaled);
+  return (r / f).toFixed(precision);
+}
+
+function toOrder(o: any): Order {
+  return {
+    orderId: str(o.orderId ?? o.orderID), clientOrderId: o.clientOrderId ?? o.clientOrderID ?? null,
+    symbol: str(o.symbol), side: str(o.side), positionSide: str(o.positionSide), type: str(o.type), status: str(o.status),
+    qty: num(o.origQty ?? o.quantity), executedQty: num(o.executedQty), avgPrice: num(o.avgPrice),
+    stopPrice: Number.isFinite(num(o.stopPrice)) && num(o.stopPrice) > 0 ? num(o.stopPrice) : null,
+    time: num(o.time), updateTime: num(o.updateTime ?? o.time),
+  };
+}
+
+export type Fetch = typeof fetch;
+
+export function createBingX(opts: { env: Env; key: string; secret: string; fetchImpl?: Fetch; now?: () => number; host?: string }) {
+  const host = opts.host ?? HOSTS[opts.env];
+  const doFetch = opts.fetchImpl ?? fetch;
+  const now = opts.now ?? Date.now;
+  const marginAsset = opts.env === "vst" ? "VST" : "USDT";
+
+  // ---- per-account queue: entries first ----
+  type Job = { prio: number; run: () => Promise<void> };
+  const queue: Job[] = [];
+  let busy = false;
+  let lastAt = 0;
+  const prioOf: Record<Priority, number> = { entry: 0, protect: 1, normal: 2 };
+  async function pump() {
+    if (busy) return;
+    busy = true;
+    try {
+      while (queue.length) {
+        queue.sort((a, b) => a.prio - b.prio);
+        const job = queue.shift()!;
+        const wait = lastAt + MIN_GAP_MS - Date.now();
+        if (wait > 0) await new Promise((r) => setTimeout(r, wait));
+        lastAt = Date.now();
+        // Start spacing only: a slow answer never holds the next request.
+        void job.run();
+      }
+    } finally {
+      busy = false;
+    }
+  }
+  function schedule<T>(priority: Priority, fn: () => Promise<T>): Promise<T> {
+    return new Promise<T>((resolve, reject) => {
+      queue.push({ prio: prioOf[priority], run: () => fn().then(resolve, reject) });
+      void pump();
+    });
+  }
+
+  async function raw(method: "GET" | "POST" | "DELETE", path: string, params: Record<string, string | number | undefined>, signed: boolean): Promise<any> {
+    const values: Record<string, string> = {};
+    for (const [k, v] of Object.entries(params)) if (v !== undefined) values[k] = String(v);
+    let url: string;
+    const headers: Record<string, string> = {};
+    if (signed) {
+      values.timestamp = String(now());
+      values.recvWindow = "5000";
+      const sorted = Object.entries(values).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
+      const signingText = sorted.map(([k, v]) => `${k}=${v}`).join("&");
+      const sig = createHmac("sha256", opts.secret).update(signingText).digest("hex");
+      url = `${host}${path}?${new URLSearchParams(sorted).toString()}&signature=${sig}`;
+      headers["X-BX-APIKEY"] = opts.key;
+    } else {
+      url = `${host}${path}?${new URLSearchParams(values).toString()}`;
+    }
+    health.requests += 1;
+    let res: Response;
+    try {
+      res = await doFetch(url, { method, headers, signal: AbortSignal.timeout(TIMEOUT_MS) });
+    } catch (err) {
+      const timeout = err instanceof Error && (err.name === "TimeoutError" || err.name === "AbortError");
+      throw new BingXError(`${method} ${path}: ${timeout ? "timeout" : "network error"}`, null, timeout ? "timeout" : "network");
+    }
+    const text = await res.text().catch(() => "");
+    let body: any;
+    try { body = parseLossless(text); } catch { throw new BingXError(`${method} ${path}: HTTP ${res.status}`, null, res.status >= 500 ? "network" : "http"); }
+    if (body?.code !== 0) {
+      const code = Number(body?.code ?? -1);
+      const msg = String(body?.msg ?? "");
+      if (code === 100410 || code === 100429 || res.status === 429) {
+        const until = Number(/unblocked after (\d{13})/.exec(msg)?.[1]);
+        blockedUntil.set(path, Number.isFinite(until) && until > Date.now() ? until : Date.now() + 2_000);
+        const hits = health.rateHits.get(path) ?? [];
+        hits.push(Date.now());
+        health.rateHits.set(path, hits.filter((t) => t > Date.now() - 3_600_000));
+        throw new BingXError(`${method} ${path}: ${code} ${msg}`.trim(), code, "rate");
+      }
+      health.lastError = { at: Date.now(), message: `${method} ${path}: ${body?.code} ${msg}`.trim().slice(0, 200) };
+      throw new BingXError(`${method} ${path}: ${body?.code} ${msg}`.trim(), code, "exchange");
+    }
+    return body.data;
+  }
+  const blockedUntil = new Map<string, number>();
+  // For Bot Health: requests, rate-limit hits per endpoint (times of the last hour), last refusal.
+  const health = { requests: 0, rateHits: new Map<string, number[]>(), lastError: null as { at: number; message: string } | null };
+  function stats() {
+    const hour = Date.now() - 3_600_000;
+    const rate = [...health.rateHits].map(([path, ts]) => ({ path, lastHour: ts.filter((t) => t > hour).length, lastAt: ts.length ? ts[ts.length - 1]! : null }))
+      .filter((r) => r.lastHour > 0);
+    return { requests: health.requests, rate, lastError: health.lastError };
+  }
+  const RATE_RETRY_MAX_MS = 30_000;
+  const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+  const RATE_TOTAL_MS = 120_000;
+  async function waitUnblocked(path: string, attempt = 0): Promise<void> {
+    const until = blockedUntil.get(path) ?? 0;
+    const ms = until - Date.now();
+    // Spread the waiters (more on each retry) so they do not all fire in the same instant.
+    if (ms > 0 && ms <= RATE_RETRY_MAX_MS) await sleep(ms + 250 + Math.floor(Math.random() * 400 * (attempt + 1)));
+  }
+  async function call(priority: Priority, method: "GET" | "POST" | "DELETE", path: string, params: Record<string, string | number | undefined> = {}, signed = true): Promise<any> {
+    // A burst of signals: many requests wait for the same unblock moment and may hit the limit
+    // again together — retried until it passes (with a small random spread), up to RATE_TOTAL_MS.
+    const started = Date.now();
+    for (let attempt = 0; ; attempt++) {
+      await waitUnblocked(path, attempt);
+      try {
+        return await schedule(priority, () => raw(method, path, params, signed));
+      } catch (e) {
+        if (!(e instanceof BingXError && e.kind === "rate")) throw e;
+        const ms = (blockedUntil.get(path) ?? 0) - Date.now();
+        if (ms > RATE_RETRY_MAX_MS || Date.now() - started > RATE_TOTAL_MS || attempt >= 8) throw e;
+      }
+    }
+  }
+
+  // ---- public ----
+  let contracts: Map<string, Contract> | null = null;
+  let contractsAt = 0;
+  async function contract(symbol: string, p: Priority = "normal"): Promise<Contract> {
+    // A coin missing from a list older than a minute: reload once (a new listing is not «no such contract»).
+    const stale = !contracts || now() - contractsAt > 3_600_000 || (!contracts.has(exSymbol(symbol)) && now() - contractsAt > 60_000);
+    if (stale) {
+      const data = await call(p, "GET", "/openApi/swap/v2/quote/contracts", {}, false);
+      const m = new Map<string, Contract>();
+      for (const r of Array.isArray(data) ? data : []) {
+        m.set(r.symbol, {
+          symbol: r.symbol, quantityPrecision: Number(r.quantityPrecision), pricePrecision: Number(r.pricePrecision),
+          minQty: num(r.tradeMinQuantity) || 0, minNotional: num(r.tradeMinUSDT) || 0,
+        });
+      }
+      contracts = m; contractsAt = now();
+    }
+    const c = contracts?.get(exSymbol(symbol));
+    if (!c) throw new BingXError(`${symbol}: no such contract`, null, "exchange");
+    return c;
+  }
+  /** The contract BingX lists for a source symbol (another number of zeros) and the price factor. */
+  async function resolveSymbol(symbol: string, p: Priority = "normal"): Promise<{ symbol: string; factor: number } | null> {
+    try { await contract(symbol, p); return { symbol, factor: 1 }; } catch (e) {
+      if (!(e instanceof BingXError && e.kind === "exchange")) throw e;
+    }
+    return mapSymbol(symbol, (s) => contracts?.has(s) ?? false);
+  }
+  async function ticker(symbol: string, p: Priority = "normal"): Promise<{ last: number; ask: number; bid: number }> {
+    const d = await call(p, "GET", "/openApi/swap/v2/quote/ticker", { symbol: exSymbol(symbol) }, false);
+    const r = Array.isArray(d) ? d[0] : d;
+    return { last: num(r?.lastPrice), ask: num(r?.askPrice) || num(r?.lastPrice), bid: num(r?.bidPrice) || num(r?.lastPrice) };
+  }
+
+  // ---- account ----
+  async function balance(p: Priority = "normal"): Promise<{ equity: number; available: number }> {
+    const d = await call(p, "GET", "/openApi/swap/v3/user/balance");
+    const rows: any[] = Array.isArray(d) ? d : Array.isArray(d?.balance) ? d.balance : d?.balance ? [d.balance] : [d];
+    const row = rows.find((r) => r?.asset === marginAsset) ?? rows.find((r) => r?.asset === "USDT") ?? rows[0];
+    return { equity: num(row?.equity ?? row?.balance), available: num(row?.availableMargin) };
+  }
+  async function positions(symbol?: string, p: Priority = "normal"): Promise<Position[]> {
+    const d = await call(p, "GET", "/openApi/swap/v2/user/positions", symbol ? { symbol: exSymbol(symbol) } : {});
+    return (Array.isArray(d) ? d : []).filter((r) => Math.abs(num(r.positionAmt)) > 0).map((r) => ({
+      symbol: str(r.symbol), positionId: str(r.positionId), positionSide: (str(r.positionSide) === "SHORT" ? "SHORT" : "LONG") as "LONG" | "SHORT",
+      qty: Math.abs(num(r.positionAmt)), avgPrice: num(r.avgPrice),
+      liquidationPrice: Number.isFinite(num(r.liquidationPrice)) && num(r.liquidationPrice) > 0 ? num(r.liquidationPrice) : null,
+      margin: Number.isFinite(num(r.initialMargin ?? r.isolatedMargin)) ? num(r.initialMargin ?? r.isolatedMargin) : null,
+      minIncreaseMargin: num(r.minIncreaseMargin) || 0,
+      leverage: Number.isFinite(num(r.leverage)) ? num(r.leverage) : null,
+      isolated: typeof r.isolated === "boolean" ? r.isolated : null,
+    }));
+  }
+  /**
+   * Hedge mode (LONG and SHORT apart) is required: every order names positionSide.
+   * Switched on when the account is in one-way mode (BingX allows it only with no positions).
+   */
+  async function ensureHedgeMode(p: Priority = "normal"): Promise<boolean> {
+    const d = await call(p, "GET", "/openApi/swap/v1/positionSide/dual");
+    const dual = d?.dualSidePosition;
+    if (dual === true || dual === "true") return true;
+    await call(p, "POST", "/openApi/swap/v1/positionSide/dual", { dualSidePosition: "true" });
+    const again = await call(p, "GET", "/openApi/swap/v1/positionSide/dual");
+    return again?.dualSidePosition === true || again?.dualSidePosition === "true";
+  }
+
+  /**
+   * BingX caps the POSITION VALUE per symbol at the current leverage (code 101209,
+   * "the maximum position value for this leverage is X USDT") — often far below
+   * what the margin would allow. Returns that cap for the side, or null if unknown.
+   */
+  async function maxPositionValue(symbol: string, side: "LONG" | "SHORT", p: Priority = "entry"): Promise<number | null> {
+    const d = await call(p, "GET", "/openApi/swap/v2/trade/leverage", { symbol: exSymbol(symbol) });
+    const row = Array.isArray(d) ? d[0] : d;
+    const v = num(side === "LONG" ? row?.maxPositionLongVal : row?.maxPositionShortVal);
+    return Number.isFinite(v) && v > 0 ? v : null;
+  }
+
+  async function ensureIsolated(symbol: string, side: "LONG" | "SHORT", leverage: number, p: Priority = "entry"): Promise<void> {
+    const s = exSymbol(symbol);
+    try { await call(p, "POST", "/openApi/swap/v2/trade/marginType", { symbol: s, marginType: "ISOLATED" }); } catch (e) {
+      // "already isolated" answers with an error code: confirm by reading.
+      const d = await call(p, "GET", "/openApi/swap/v2/trade/marginType", { symbol: s });
+      if (str(d?.marginType).toUpperCase() !== "ISOLATED") throw e;
+    }
+    try { await call(p, "POST", "/openApi/swap/v2/trade/leverage", { symbol: s, side, leverage }); } catch (e) {
+      const d = await call(p, "GET", "/openApi/swap/v2/trade/leverage", { symbol: s });
+      const cur = side === "LONG" ? num(d?.longLeverage) : num(d?.shortLeverage);
+      if (cur !== leverage) throw e;
+    }
+  }
+  async function placeOrder(params: Record<string, string | number | undefined>, p: Priority): Promise<Order> {
+    if (params.symbol) openCache.delete(String(params.symbol));
+    const d = await call(p, "POST", "/openApi/swap/v2/trade/order", params);
+    if (params.symbol) openCache.delete(String(params.symbol));
+    return toOrder(d?.order ?? d);
+  }
+  async function queryOrder(symbol: string, by: { orderId?: string; clientOrderId?: string }, p: Priority = "normal"): Promise<Order | null> {
+    try {
+      const d = await call(p, "GET", "/openApi/swap/v2/trade/order", { symbol: exSymbol(symbol), ...by });
+      const o = d?.order ?? d;
+      return o && (o.orderId || o.orderID) ? toOrder(o) : null;
+    } catch (e) {
+      if (e instanceof BingXError && e.kind === "exchange") return null; // not found
+      throw e;
+    }
+  }
+  const openCache = new Map<string, { at: number; list: Order[]; ttl: number }>();
+  const OPEN_CACHE_MS = 5_000;
+  /** A reconcile pass (every 20 s) may take longer than 5 s with many positions: its snapshot lives 15 s. */
+  const PREFETCH_CACHE_MS = 15_000;
+  async function openOrders(symbol: string, p: Priority = "normal"): Promise<Order[]> {
+    const key = exSymbol(symbol);
+    const hit = openCache.get(key);
+    if (hit && Date.now() - hit.at < hit.ttl) return hit.list;
+    const d = await call(p, "GET", "/openApi/swap/v2/trade/openOrders", { symbol: key });
+    const list = (Array.isArray(d) ? d : d?.orders ?? []).map(toOrder);
+    openCache.set(key, { at: Date.now(), list, ttl: OPEN_CACHE_MS });
+    return list;
+  }
+  /** One request for all open orders of the account (a reconcile pass): every symbol asked is cached, empty ones too. */
+  async function prefetchOpenOrders(symbols: string[], p: Priority = "normal"): Promise<void> {
+    const at = Date.now();
+    const d = await call(p, "GET", "/openApi/swap/v2/trade/openOrders", {});
+    const all: Order[] = (Array.isArray(d) ? d : d?.orders ?? []).map(toOrder);
+    for (const s of new Set(symbols.map(exSymbol))) openCache.set(s, { at, list: all.filter((o) => o.symbol === s), ttl: PREFETCH_CACHE_MS });
+  }
+  async function cancelOrder(symbol: string, orderId: string, p: Priority = "protect"): Promise<void> {
+    openCache.delete(exSymbol(symbol));
+    try { await call(p, "DELETE", "/openApi/swap/v2/trade/order", { symbol: exSymbol(symbol), orderId }); } catch (e) {
+      // Already filled / cancelled: nothing to cancel.
+      if (!(e instanceof BingXError && e.kind === "exchange")) throw e;
+    }
+  }
+  async function history(symbol: string, sinceMs: number, p: Priority = "normal"): Promise<Order[]> {
+    const d = await call(p, "GET", "/openApi/swap/v2/trade/allOrders", { symbol: exSymbol(symbol), startTime: sinceMs, endTime: now(), limit: 500 });
+    const list = Array.isArray(d) ? d : d?.orders ?? [];
+    return list.map(toOrder);
+  }
+  async function addMargin(symbol: string, side: "LONG" | "SHORT", amount: string, p: Priority = "protect"): Promise<void> {
+    await call(p, "POST", "/openApi/swap/v2/trade/positionMargin", { symbol: exSymbol(symbol), amount, type: 1, positionSide: side });
+  }
+
+  return { env: opts.env, stats, contract, resolveSymbol, ticker, balance, positions, ensureHedgeMode, ensureIsolated, maxPositionValue, placeOrder, queryOrder, openOrders, prefetchOpenOrders, cancelOrder, history, addMargin };
+}
+
+export type BingX = ReturnType<typeof createBingX>;
