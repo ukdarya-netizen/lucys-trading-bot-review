@@ -19,8 +19,8 @@ const NAV_ITEMS = [
   { group: "Торговля", href: "/journal/overview", label: "Обзор", short: "Обзор", sub: "результат CAB и Нигилиста", icon: LayoutDashboard },
   { group: "Торговля", href: "/journal/positions", label: "Позиции", short: "Позиции", sub: "открытые сейчас", icon: Crosshair },
   { group: "Торговля", href: "/journal/trades", label: "История", short: "История", sub: "закрытые и не открытые", icon: History },
-  { group: "Управление", href: "/journal/bots", label: "CAB и Нигилист", short: "Боты", sub: "размер, стратегия, BTC", icon: SlidersHorizontal },
-  { group: "Управление", href: "/journal/my-bot", label: "Мой кабинет", short: "Кабинет", sub: "вкл/выкл торговли", icon: UserRound },
+  { group: "Управление", href: "/journal/bots", label: "CAB и Нигилист", short: "Боты", sub: "результаты стратегий", icon: SlidersHorizontal },
+  { group: "Управление", href: "/journal/my-bot", label: "Мой кабинет", short: "Кабинет", sub: "торговля, стратегия, BTC", icon: UserRound },
   { group: "Управление", href: "/journal/health", label: "Bot Health", short: "Health", sub: "работает ли бот, ошибки", icon: HeartPulse },
   { group: "Люди", href: "/journal/subscribers", label: "Подписчики", short: "Подписчики", sub: "заявки, сроки, боты", icon: Users },
 ] as const;

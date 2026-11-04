@@ -6,7 +6,7 @@ import { useMutation } from "@tanstack/react-query";
 import { Link } from "wouter";
 import { Switch } from "@/components/ui/switch";
 import { api, ApiFailure } from "@/lib/subscriber-api";
-import { useExecutor, type Status } from "@/components/executor-ui";
+import { LoadingOrError, useExecutor, type Status } from "@/components/executor-ui";
 import { InboxLine } from "@/components/SourceSettings";
 import { BtcCard, defaultBtc } from "@/components/BtcCard";
 import { OwnerStrategyCard } from "@/components/owner-strategy-card";
@@ -37,7 +37,8 @@ export function MainAccountToggles() {
   const [tab, setTab] = useState<Source>(() => { try { return localStorage.getItem("cabinet-tab") === "nihilist" ? "nihilist" : "cab"; } catch { return "cab"; } });
   const choose = (t: Source) => { setTab(t); try { localStorage.setItem("cabinet-tab", t); } catch { /* private mode */ } };
   const d = ex.data;
-  if (!d) return null;
+  // Never an empty page: while loading or on an error, say so (owner 2026-11-04).
+  if (!d) return <LoadingOrError q={ex} />;
   const account = d.accounts[0];
   const refetch = () => void ex.refetch();
   return (

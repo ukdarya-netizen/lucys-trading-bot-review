@@ -127,7 +127,7 @@ function CabStrategies({ d }: { d: Status }) {
       return (
         <span className="mt-3 block space-y-1 border-t border-border pt-2 text-xs">
           {choices.patterns.map((p) => {
-            const st = r.byPattern[p.id];
+            const st = r.byPattern?.[p.id];
             return (
               <span key={p.id} className="block tabular">
                 <b>{p.label}</b>{!st ? <span className="text-muted-foreground"> · сделок нет</span> : <> · {st.follow_cab?.n ?? 0} сделок · депозит{" "}
@@ -141,7 +141,7 @@ function CabStrategies({ d }: { d: Status }) {
         </span>
       );
     }
-    return <span className="mt-3 block border-t border-border pt-2 text-xs"><ResultLine name="Лонги" r={r.exits[id]} money={m} /></span>;
+    return <span className="mt-3 block border-t border-border pt-2 text-xs"><ResultLine name="Лонги" r={r.exits?.[id]} money={m} /></span>;
   };
   return <OwnerStrategyCard toolbar={toolbar} extra={extra} readOnly />;
 }
@@ -155,7 +155,7 @@ function NihilistStrategies({ d }: { d: Status }) {
   const strategies = d.nihilist.strategies;
   const report = rep.data?.report ?? null;
   const running = Boolean(rep.data?.running) || report?.status === "running";
-  const dataset = report?.datasets.find((x) => x.name === ds) ?? report?.datasets[0] ?? null;
+  const dataset = report?.datasets?.find((x) => x.name === ds) ?? report?.datasets?.[0] ?? null;
 
   const m = depositOf(d, d.nihilist.settings);
 
@@ -164,7 +164,7 @@ function NihilistStrategies({ d }: { d: Status }) {
       <div className="flex flex-wrap items-center gap-3">
         <div className="inline-grid grid-cols-2 border border-border">
           {(["history", "live"] as const).map((n) => (
-            <button key={n} type="button" aria-pressed={dataset?.name === n} onClick={() => setDs(n)} disabled={!report?.datasets.some((x) => x.name === n)}
+            <button key={n} type="button" aria-pressed={dataset?.name === n} onClick={() => setDs(n)} disabled={!report?.datasets?.some((x) => x.name === n)}
               className={`min-h-10 px-3 text-xs font-bold disabled:opacity-40 ${dataset?.name === n ? "bg-primary text-primary-foreground" : "text-muted-foreground"}`}>
               {n === "history" ? `Бэктест ${rep.data?.historyDays ?? 60} дней` : "Реальные сигналы"}
             </button>
@@ -195,7 +195,7 @@ function NihilistStrategies({ d }: { d: Status }) {
             saved={current === st.id} active={current === st.id} readOnly>
             {dataset && (
               <span className="mt-3 block space-y-1 border-t border-border pt-2 text-xs">
-                {SIDES.map(([g, name]) => <ResultLine key={g} name={name} r={dataset.groups[g]?.find((x) => x.id === st.id)?.stats} money={m} />)}
+                {SIDES.map(([g, name]) => <ResultLine key={g} name={name} r={dataset.groups?.[g]?.find((x) => x.id === st.id)?.stats} money={m} />)}
               </span>
             )}
           </StrategyCard>
