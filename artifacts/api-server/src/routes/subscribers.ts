@@ -1,6 +1,7 @@
 import { clerkClient, getAuth } from "@clerk/express";
 import { Router, type IRouter, type Request, type Response } from "express";
 import { pool } from "@workspace/db";
+import { SetSubscriberSourcesBody, SetSubscriberSourcesParams, SetSubscriberSourcesResponse } from "@workspace/api-zod";
 import { announceRequest, botUsername, decide, send as sendTelegram, TEXT as SUB_TEXT, type Decision } from "../lib/subscriber-bot";
 import { BTC_MAX_LEVERAGE, getBtcSettings, getSourceSettings, saveBtcSettings } from "../executor/store";
 import { closeReasonText } from "../executor/texts";
@@ -645,6 +646,36 @@ router.get("/journal/subscribers", requireJournalSession, requireJournalOwner, a
     return { ...publicView(row), stats };
   });
   res.json({ subscribers: list, keysConfigured: subscriberKeysConfigured() });
+});
+
+router.post("/journal/subscribers/:id/sources", requireJournalSession, requireJournalOwner, async (req, res) => {
+  const params = SetSubscriberSourcesParams.safeParse(req.params);
+  if (!params.success) return refuse(res, 400, "invalid_subscriber_id", "Неверный идентификатор подписчика");
+  const body = SetSubscriberSourcesBody.safeParse(req.body);
+  if (!body.success) return refuse(res, 400, "invalid_sources", "Выберите Crypto Alts Bullet, Nihilyst Crypto Trading или оба бота");
+  if (new Set(body.data.sources).size !== body.data.sources.length) {
+    return refuse(res, 400, "duplicate_sources", "Каждый бот можно выбрать только один раз");
+  }
+
+  const sources = (["cab", "nihilist"] as const).filter((source) => body.data.sources.includes(source));
+  const value = sources.join(",");
+  const updated = await pool.query(
+    `UPDATE subscribers SET trade_sources = $2, version = version + 1, updated_at = now()
+     WHERE id = $1 AND status IN ('pending', 'approved')
+     RETURNING id, trade_sources`,
+    [params.data.id, value],
+  );
+  if (!updated.rowCount) {
+    const existing = await pool.query("SELECT id FROM subscribers WHERE id = $1", [params.data.id]);
+    if (!existing.rowCount) return refuse(res, 404, "not_found", "Подписчик не найден");
+    return refuse(res, 409, "subscription_not_editable", "Доступ можно менять только для новой заявки или одобренной подписки");
+  }
+
+  const row = updated.rows[0] as { id: number; trade_sources: string };
+  res.json(SetSubscriberSourcesResponse.parse({
+    id: Number(row.id),
+    tradeSources: String(row.trade_sources).split(",").filter(Boolean),
+  }));
 });
 
 router.post("/journal/subscribers/:id/decision", requireJournalSession, requireJournalOwner, async (req, res) => {

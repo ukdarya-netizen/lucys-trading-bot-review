@@ -1,18 +1,38 @@
 // Обзор торгового бота (owner 2026-11-03): both signal sources at a glance — or one of them.
-import { useMemo } from "react";
+import { useMemo, type ReactNode } from "react";
+import { Crosshair, Percent, ShieldAlert, TrendingUp, Wallet } from "lucide-react";
 import { CartesianGrid, Line, LineChart, ReferenceLine, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import { formatUsdt, toneClass } from "@/lib/performance";
+import { BOT_BRAND_NAMES } from "@/components/BotBrand";
 import {
-  LoadingOrError, SourceSwitch, SourcesStatus, TotalsTable, bySource, useExecutor, useSourceFilter,
+  LoadingOrError, OwnerAccountNotice, ownerAccountOf, SourceSwitch, SourcesStatus, TotalsTable, bySource, useExecutor, useSourceFilter,
 } from "@/components/executor-ui";
 
-function Kpi({ label, value, hint, tone }: { label: string; value: string; hint?: string; tone?: string }) {
+function Kpi({ label, value, hint, tone, icon }: { label: string; value: string; hint?: string; tone?: string; icon?: ReactNode }) {
   return (
-    <div className="border border-border bg-card p-4">
-      <p className="text-[10px] uppercase text-muted-foreground">{label}</p>
-      <p className={`mt-1 text-xl font-bold tabular ${tone ?? ""}`}>{value}</p>
-      {hint && <p className="text-xs text-muted-foreground">{hint}</p>}
+    <div className="flex h-full items-start gap-3 border border-border bg-card p-4">
+      {icon && <span className="lucy-kpi-icon">{icon}</span>}
+      <div className="min-w-0">
+        <p className="text-[10px] uppercase text-muted-foreground">{label}</p>
+        <p className={`mt-1 text-xl font-bold tabular ${tone ?? ""}`}>{value}</p>
+        {hint && <p className="text-xs text-muted-foreground">{hint}</p>}
+      </div>
     </div>
+  );
+}
+
+/** Header with the owner's picture (owner 2026-11-04). */
+function Hero({ enabled, env }: { enabled: boolean; env: string | undefined }) {
+  return (
+    <section className="lucy-hero">
+      <img className="lucy-hero-img" src={`${import.meta.env.BASE_URL}lucy-hero.webp`} alt="" width={820} height={640} />
+      <div className="lucy-hero-body">
+        <p className="lucy-hero-kicker">BingX · {env === "real" ? "реальный счёт" : "демо VST"}</p>
+        <h2 className="lucy-hero-title">Lucy&apos;s<br />Trading Bot</h2>
+        <p className="lucy-hero-text">Сделки по сигналам {BOT_BRAND_NAMES.cab} и {BOT_BRAND_NAMES.nihilist}: вход, стоп и выход — автоматически, по выбранной стратегии.</p>
+        {enabled && <span className="lucy-online"><i />Приём сигналов</span>}
+      </div>
+    </section>
   );
 }
 
@@ -34,23 +54,25 @@ export default function TradeOverview() {
   const n = totals.reduce((s, t) => s + t.closed, 0);
   const wins = totals.reduce((s, t) => s + t.wins, 0);
   const liq = totals.reduce((s, t) => s + t.liquidations, 0);
-  const a = d.accounts[0];
+  const a = ownerAccountOf(d);
   const asset = a?.env === "real" ? "USDT" : "VST";
-  const name = filter === "all" ? "оба бота" : filter === "cab" ? "CAB" : "Нигилист";
+  const name = filter === "all" ? "оба бота" : BOT_BRAND_NAMES[filter];
 
   return (
     <div className="mx-auto max-w-7xl space-y-5">
+      <Hero enabled={d.enabled && Boolean(d.ownerAccount?.tradingEnabled && d.ownerAccount.balanceStatus === "available")} env={a?.env} />
+      <OwnerAccountNotice d={d} />
       {!d.enabled && <p className="border border-destructive/50 bg-destructive/10 p-3 text-sm text-destructive">Торговый бот выключен: в Secrets нет EXECUTOR_V2=1.</p>}
       <div className="flex flex-wrap items-center justify-between gap-3">
         <SourceSwitch value={filter} onChange={setFilter} />
       </div>
 
-      <section className="grid grid-cols-2 gap-3 lg:grid-cols-5">
-        <div className="col-span-2 lg:col-span-1"><Kpi label={a?.label ?? "Счёт"} value={a?.balance ? `${a.balance.equity.toLocaleString("ru-RU", { maximumFractionDigits: 2 })} ${asset}` : "—"} hint={a?.balance ? `свободно ${a.balance.available.toLocaleString("ru-RU", { maximumFractionDigits: 2 })}` : undefined} /></div>
-        <Kpi label={`Результат закрытых · ${name}`} value={`${formatUsdt(pnl)} ${asset}`} tone={toneClass(n ? pnl : null)} hint={`${n} сделок`} />
-        <Kpi label="Доля плюсовых" value={n ? `${Math.round((wins / n) * 100)}%` : "—"} hint={n ? `${wins} из ${n}` : "сделок ещё нет"} />
-        <Kpi label="Открыто сейчас" value={String(open.length)} tone={toneClass(open.length ? floating : null)} hint={`плавающий ${formatUsdt(floating)} ${asset}`} />
-        <Kpi label="Ликвидаций" value={String(liq)} tone={liq ? "text-destructive" : ""} hint={liq ? "нужно разобрать" : "ни одной"} />
+      <section className="grid grid-cols-2 gap-3 lg:grid-cols-6">
+        <div className="col-span-2 lg:col-span-3"><Kpi icon={<Wallet className="h-5 w-5" />} label={a?.label ?? "Счёт"} value={a?.balance ? `${a.balance.equity.toLocaleString("ru-RU", { maximumFractionDigits: 2 })} ${asset}` : "—"} hint={a?.balance ? `свободно ${a.balance.available.toLocaleString("ru-RU", { maximumFractionDigits: 2 })}` : undefined} /></div>
+        <div className="col-span-2 lg:col-span-3"><Kpi icon={<TrendingUp className="h-5 w-5" />} label={`Результат закрытых · ${name}`} value={`${formatUsdt(pnl)} ${asset}`} tone={toneClass(n ? pnl : null)} hint={`${n} сделок`} /></div>
+        <div className="lg:col-span-2"><Kpi icon={<Percent className="h-5 w-5" />} label="Доля плюсовых" value={n ? `${Math.round((wins / n) * 100)}%` : "—"} hint={n ? `${wins} из ${n}` : "сделок ещё нет"} /></div>
+        <div className="lg:col-span-2"><Kpi icon={<Crosshair className="h-5 w-5" />} label="Открыто сейчас" value={String(open.length)} tone={toneClass(open.length ? floating : null)} hint={`плавающий ${formatUsdt(floating)} ${asset}`} /></div>
+        <div className="lg:col-span-2"><Kpi icon={<ShieldAlert className="h-5 w-5" />} label="Ликвидаций" value={String(liq)} tone={liq ? "text-destructive" : ""} hint={liq ? "нужно разобрать" : "ни одной"} /></div>
       </section>
 
       <SourcesStatus d={d} />

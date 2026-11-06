@@ -1,0 +1,1 @@
+- [Migration constraints](migration-constraints.md) — preserve the old trading bot unchanged; isolate all checks and never substitute an unverified GitHub version.

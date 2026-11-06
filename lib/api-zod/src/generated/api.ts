@@ -9,6 +9,74 @@ import * as zod from 'zod';
 
 
 /**
+ * Owner-only. Updates a pending request before approval or changes an existing subscriber's bot access without changing global bot settings.
+ * @summary Set the bots available to one subscriber
+ */
+
+
+
+export const SetSubscriberSourcesParams = zod.object({
+  "id": zod.coerce.number().int().min(1)
+})
+
+export const setSubscriberSourcesBodySourcesMax = 2;
+
+
+
+export const SetSubscriberSourcesBody = zod.object({
+  "sources": zod.array(zod.enum(['cab', 'nihilist'])).min(1).max(setSubscriberSourcesBodySourcesMax)
+})
+
+export const setSubscriberSourcesResponseTradeSourcesMax = 2;
+
+
+
+export const SetSubscriberSourcesResponse = zod.object({
+  "id": zod.int(),
+  "tradeSources": zod.array(zod.enum(['cab', 'nihilist'])).min(1).max(setSubscriberSourcesResponseTradeSourcesMax)
+})
+
+
+/**
+ * @summary Owner-only effective VST trading controls
+ */
+export const GetExecutorTradingControlsResponseItem = zod.object({
+  "target": zod.enum(['owner', 'subscribers']),
+  "env": zod.enum(['vst']),
+  "enabled": zod.boolean(),
+  "effective": zod.boolean(),
+  "canManage": zod.boolean(),
+  "canEnable": zod.boolean(),
+  "blockedReason": zod.string().nullable(),
+  "activeAccounts": zod.int(),
+  "startedAt": zod.string().nullable()
+})
+export const GetExecutorTradingControlsResponse = zod.array(GetExecutorTradingControlsResponseItem)
+
+
+/**
+ * @summary Owner enables or pauses new VST entries without restarting the service
+ */
+export const UpdateExecutorTradingControlBody = zod.object({
+  "target": zod.enum(['owner', 'subscribers']),
+  "enabled": zod.boolean()
+})
+
+export const UpdateExecutorTradingControlResponseItem = zod.object({
+  "target": zod.enum(['owner', 'subscribers']),
+  "env": zod.enum(['vst']),
+  "enabled": zod.boolean(),
+  "effective": zod.boolean(),
+  "canManage": zod.boolean(),
+  "canEnable": zod.boolean(),
+  "blockedReason": zod.string().nullable(),
+  "activeAccounts": zod.int(),
+  "startedAt": zod.string().nullable()
+})
+export const UpdateExecutorTradingControlResponse = zod.array(UpdateExecutorTradingControlResponseItem)
+
+
+/**
  * Requires the existing X-Trading-Token. Receipt is not proof of closure. REAL is excluded.
  * @summary Cancel old queued entries and close own PAPER and VST positions
  */

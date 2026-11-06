@@ -1,3 +1,4 @@
+import { BOT_BRAND_NAMES } from "@/components/BotBrand";
 import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "@/lib/subscriber-api";
@@ -13,7 +14,7 @@ type Paper = {
 };
 
 const EXITS: { id: ExitId; name: string; short: string }[] = [
-  { id: "follow_cab", name: "1. Полностью как CAB", short: "Как CAB" },
+  { id: "follow_cab", name: `1. Полностью как ${BOT_BRAND_NAMES.cab}`, short: `Как ${BOT_BRAND_NAMES.cab}` },
   { id: "take5", name: "2. Фиксация на +5%", short: "+5%" },
   { id: "take8", name: "3. Фиксация на +8%", short: "+8%" },
   { id: "take10", name: "4. Фиксация на +10%", short: "+10%" },
@@ -65,7 +66,7 @@ export function StrategyPaperPanel({ endpoint, patterns = [], days }: {
         <div>
           <h3 className="text-base font-bold">Сколько заработала бы каждая стратегия</h3>
           <p className="mt-1 text-sm text-muted-foreground">
-            Результат в % к депозиту, если бы бот торговал все сигналы CAB этой стратегией.
+            Результат в % к депозиту, если бы бот торговал все сигналы {BOT_BRAND_NAMES.cab} этой стратегией.
           </p>
         </div>
         {!controlled && <div className="flex border border-border text-sm">
@@ -152,12 +153,12 @@ export function StrategyPaperPanel({ endpoint, patterns = [], days }: {
           <details className="text-sm">
             <summary className="cursor-pointer font-semibold">Как это считается</summary>
             <ul className="mt-2 list-disc space-y-1 pl-5 text-muted-foreground">
-              <li>Берётся каждый закрытый сигнал CAB по 4 паттернам — как будто бот его открыл, даже если на самом деле не открыл.</li>
+              <li>Берётся каждый закрытый сигнал {BOT_BRAND_NAMES.cab} по 4 паттернам — как будто бот его открыл, даже если на самом деле не открыл.</li>
               <li>Размер сделки: 1% депозита маржи при плече 10x. Значит, +1% цены = +0,1% к депозиту. Сделки просто складываются, без сложного процента.</li>
-              <li>«Как CAB» — вход и выход ровно по CAB.</li>
-              <li>«+5 / +8 / +10%» — если цена после входа дошла до цели, сделка фиксируется на цели; если нет — закрывается там же, где её закрыл CAB.</li>
-              <li>BTC при любой стратегии считается как CAB. Комиссия 0,1% на сделку.</li>
-              <li>Impulse Buy считается по итоговому выходу CAB, без деления на 80/20.</li>
+              <li>«Как {BOT_BRAND_NAMES.cab}» — вход и выход по его правилам.</li>
+              <li>«+5 / +8 / +10%» — если цена после входа дошла до цели, сделка фиксируется на цели; если нет — закрывается там же, где её закрыл {BOT_BRAND_NAMES.cab}.</li>
+              <li>BTC при любой стратегии считается по правилам {BOT_BRAND_NAMES.cab}. Комиссия 0,1% на сделку.</li>
+              <li>Impulse Buy считается по итоговому выходу {BOT_BRAND_NAMES.cab}, без деления на 80/20.</li>
               {d.otherPatternsExcluded > 0 && <li>Старые паттерны не учитываются (сделок: {d.otherPatternsExcluded}).</li>}
             </ul>
           </details>

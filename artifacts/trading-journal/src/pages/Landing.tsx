@@ -18,7 +18,7 @@ export default function Landing() {
           <div className="text-left">
             <div className="cyber-kicker font-mono text-[10px] uppercase tracking-[.24em] text-primary">/ private journal / owner access</div>
             <h1 className="mt-5 max-w-3xl text-5xl font-bold leading-[.96] tracking-[-.055em] text-foreground sm:text-7xl">
-              Личный<br /><span className="text-primary">торговый</span> дневник
+              Торговый<br /><span className="text-primary">дневник</span>
             </h1>
             <p className="mt-7 max-w-xl text-base leading-7 text-muted-foreground sm:text-lg">
               Сделки, сигналы и результаты в одном защищённом контуре. Войдите с телефона по своему email.

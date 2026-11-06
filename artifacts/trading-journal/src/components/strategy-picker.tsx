@@ -1,3 +1,5 @@
+import { BOT_BRAND_NAMES } from "@/components/BotBrand";
+
 import { useEffect, useState, type ReactNode } from "react";
 import { StrategyCard } from "@/components/StrategyCard";
 
@@ -9,19 +11,19 @@ export type StrategyChoices = {
 export type StrategyValue = { strategy: string | null; patternExit: string | null; patterns: string[] };
 
 export const STRATEGY_DESCRIPTIONS: Record<string, string> = {
-  follow_cab: "Бот делает всё, как CAB: стоп, перенос стопа в безубыток, трейлинг и закрытие — по правилам CAB для каждого паттерна. Своих правил у бота нет.",
-  take5: "Вся позиция закрывается, когда цена прошла +5% от входа. Стоп и закрытие до этого — как в CAB.",
-  take8: "Вся позиция закрывается, когда цена прошла +8% от входа. Стоп и закрытие до этого — как в CAB.",
-  take10: "Вся позиция закрывается, когда цена прошла +10% от входа. Стоп и закрытие до этого — как в CAB.",
+  follow_cab: `Бот делает всё, как ${BOT_BRAND_NAMES.cab}: стоп, перенос стопа в безубыток, трейлинг и закрытие — по правилам ${BOT_BRAND_NAMES.cab} для каждого паттерна. Своих правил у бота нет.`,
+  take5: `Вся позиция закрывается, когда цена прошла +5% от входа. Стоп и закрытие до этого — как в ${BOT_BRAND_NAMES.cab}.`,
+  take8: `Вся позиция закрывается, когда цена прошла +8% от входа. Стоп и закрытие до этого — как в ${BOT_BRAND_NAMES.cab}.`,
+  take10: `Вся позиция закрывается, когда цена прошла +10% от входа. Стоп и закрытие до этого — как в ${BOT_BRAND_NAMES.cab}.`,
   patterns: "Торгуются только выбранные паттерны (1, 2 или 3 из 4), выход — на выбор.",
 };
 
 /**
- * Strategy picker shared by the subscriber cabinet and the owner's VST page.
+ * Strategy picker shared by the subscriber cabinet and the owner's cabinet (results page: read-only).
  * Strategies 1-4 save on click; "По паттернам" saves after choosing 1-3
  * patterns and an exit. Bitcoin is set on the same page, in its own card.
  */
-export function StrategyPicker({ value, choices, disabled, pending, onSave, extra }: {
+export function StrategyPicker({ value, choices, disabled, pending, onSave, extra, readOnly }: {
   value: StrategyValue;
   choices: StrategyChoices;
   disabled?: boolean;
@@ -29,6 +31,8 @@ export function StrategyPicker({ value, choices, disabled, pending, onSave, extr
   onSave: (choice: { strategy: string; patternExit?: string; patterns?: string[] }) => void;
   /** Results shown inside a strategy card (owner's page). */
   extra?: (id: string) => ReactNode;
+  /** Results page: cards only show; choosing is in «Мой кабинет». */
+  readOnly?: boolean;
 }) {
   const [draft, setDraft] = useState<string | null>(value.strategy);
   const [patterns, setPatterns] = useState<string[]>(value.patterns);
@@ -48,13 +52,13 @@ export function StrategyPicker({ value, choices, disabled, pending, onSave, extr
       <div className="grid gap-3 sm:grid-cols-2">
         {choices.strategies.map((s, index) => (
           <StrategyCard key={s.id} index={index + 1} label={s.label} description={STRATEGY_DESCRIPTIONS[s.id]}
-            saved={value.strategy === s.id} active={draft === s.id} disabled={lock}
+            saved={value.strategy === s.id} active={draft === s.id} disabled={lock} readOnly={readOnly}
             onClick={() => { setDraft(s.id); if (s.id !== "patterns" && value.strategy !== s.id) onSave({ strategy: s.id }); }}>
             {extra?.(s.id)}
           </StrategyCard>
         ))}
       </div>
-      {draft === "patterns" && (
+      {draft === "patterns" && !readOnly && (
         <div className="border border-border p-4 space-y-3" data-testid="strategy-patterns">
           <div>
             <p className="text-sm font-semibold">Паттерны (от 1 до 3)</p>

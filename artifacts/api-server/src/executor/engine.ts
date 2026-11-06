@@ -61,6 +61,7 @@ export const REASON_TEXT: Record<string, string> = {
   entry_not_found: "ордер не найден на бирже",
   source_cancelled: "сигнал отменён источником",
   source_disabled: "торговля по этому источнику выключена в настройках",
+  account_paused: "новые входы по счёту остановлены в кабинете",
   btc_disabled: "торговля биткоином по этому источнику выключена в настройках",
   one_way_mode: "на счёте BingX включён односторонний режим позиций, а нужен раздельный (Hedge) — переключите в настройках фьючерсов BingX",
   error: "ошибка",
@@ -68,6 +69,7 @@ export const REASON_TEXT: Record<string, string> = {
 
 export function createExecutor(deps: {
   loadAccounts: () => Promise<Account[]>;
+  entryAllowed: (account: Account, releasedAt: number) => Promise<boolean>;
   bingx: (a: Account) => BingX;
   send: Sender;
   now?: () => number;
@@ -140,6 +142,7 @@ export function createExecutor(deps: {
   async function enter(rt: Runtime, sigIn: SignalIn): Promise<void> {
     const a = rt.acct;
     if (sigIn.releasedAt < a.startedAt) return;
+    if (!await deps.entryAllowed(a, sigIn.releasedAt).catch(() => false)) return;
     // Another number of zeros on BingX (1000000MOG ↔ MOG, LUNC): BingX's symbol, prices rescaled.
     // A network error here is not «no such coin»: go on with the symbol as sent (the entry reports its own error).
     const mapped = await rt.ex.resolveSymbol(sigIn.symbol, "entry").catch(() => ({ symbol: sigIn.symbol, factor: 1 }));
@@ -209,13 +212,17 @@ export function createExecutor(deps: {
       if ("error" in size) return skip(rt, t, size.error);
 
       const cid = clientId(rt, sig.sourceSignalId);
-      await updateTrade(t.id, { client_order_id: cid, entry_sent_at: new Date(now()) });
       const params = {
         symbol: exSymbol(sig.symbol), side: openSide(sig.side), positionSide: posSide(sig.side), type: "LIMIT", timeInForce: "IOC",
         price: entryLimitPrice(sig.side, q, c), quantity: size.qty, clientOrderId: cid,
         stopLoss: JSON.stringify({ type: "STOP_MARKET", stopPrice: Number(decimalAt(sig.stop, c.pricePrecision)), workingType: "MARK_PRICE" }),
       };
       let order: Order | null = null;
+      // Recheck after exchange preparation; a pause also stops work queued before the click.
+      if (!await deps.entryAllowed(a, sig.releasedAt).catch(() => false)) {
+        return skip(rt, t, "account_paused", false);
+      }
+      await updateTrade(t.id, { client_order_id: cid, entry_sent_at: new Date(now()) });
       try {
         order = await rt.ex.placeOrder(params, "entry");
       } catch (e) {

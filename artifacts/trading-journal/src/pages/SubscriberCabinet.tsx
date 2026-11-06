@@ -3,6 +3,7 @@ import { useClerk } from "@clerk/react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { CheckCircle2, Clock, KeyRound, LogOut, Play, ShieldX, Square, Target } from "lucide-react";
 import { BrandLockup } from "@/components/brand";
+import { BotBrand, BOT_BRAND_NAMES } from "@/components/BotBrand";
 import { StrategyPicker, type StrategyChoices } from "@/components/strategy-picker";
 import { BtcCard, defaultBtc, type BtcSettings } from "@/components/BtcCard";
 import { StrategyCard, StrategySection, NIHILIST_DESCRIPTIONS } from "@/components/StrategyCard";
@@ -159,15 +160,15 @@ function StrategyStep({ sub, choices, onChanged }: { sub: Subscription; choices:
         <div role="tablist" className="mb-4 flex gap-1 border-b border-border">
           {sources.map((s) => (
             <button key={s} role="tab" type="button" aria-selected={active === s} onClick={() => setTab(s)}
-              className={`-mb-px min-h-11 border border-b-0 px-5 text-sm font-bold ${active === s ? "border-border bg-background" : "border-transparent text-muted-foreground hover:text-foreground"}`}>
-              {s === "cab" ? "CAB" : "Нигилист"}
+              className={`-mb-px flex min-h-14 min-w-0 flex-1 items-center justify-center border border-b-0 px-2 sm:px-5 ${active === s ? "border-border bg-background" : "border-transparent text-muted-foreground hover:text-foreground"}`}>
+              <BotBrand source={s} size="sm" />
             </button>
           ))}
         </div>
       )}
       <div className="space-y-4">
         {active === "cab" ? (
-          <StrategySection title="Как вести сделки CAB" current={sub.strategyText ?? null}>
+          <StrategySection title={`Как вести сделки ${BOT_BRAND_NAMES.cab}`} current={sub.strategyText ?? null}>
             <StrategyPicker
               value={{ strategy: sub.strategy, patternExit: sub.patternExit, patterns: sub.patterns }}
               choices={choices} disabled={sub.tradingEnabled} pending={choose.isPending}
@@ -175,21 +176,21 @@ function StrategyStep({ sub, choices, onChanged }: { sub: Subscription; choices:
             {sub.tradingEnabled && <p className="text-xs text-muted-foreground">Стратегию можно сменить после остановки торговли.</p>}
           </StrategySection>
         ) : (
-          <StrategySection title="Как вести сделки Нигилиста" current={nh?.label ?? null}>
-            <p className="text-sm text-muted-foreground">Стратегию для сигналов Нигилиста выбирает владелец — она одна для всех.</p>
+          <StrategySection title={`Как вести сделки ${BOT_BRAND_NAMES.nihilist}`} current={nh?.label ?? null}>
+            <p className="text-sm text-muted-foreground">Стратегию для сигналов {BOT_BRAND_NAMES.nihilist} выбирает владелец — она одна для всех.</p>
             {nh && <div className="grid gap-3 sm:grid-cols-2">
               <StrategyCard index={1} label={nh.label} description={NIHILIST_DESCRIPTIONS[nh.id]} saved active disabled />
             </div>}
           </StrategySection>
         )}
         {btc.data && (
-          <BtcCard key={active} title={`Биткоин (BTC) в сделках ${active === "cab" ? "CAB" : "Нигилиста"}`}
+          <BtcCard key={active} title={`Биткоин (BTC) · ${BOT_BRAND_NAMES[active]}`}
             saved={btc.data.settings.find((b) => b.source === active) ?? defaultBtc(active)} maxLeverage={btc.data.maxLeverage}
             savePath="/me/btc-settings" onSaved={() => void btc.refetch()}
             otherMargin={ps.allocationMode === "amount" ? ps.allocationValue : null}
             otherText={ps.allocationMode === "percent" ? `${ps.allocationValue}% от баланса` : `${ps.allocationValue} ${unit}`}
             equity={null} asset={unit}
-            note={active === "cab" ? "Ведение BTC — по правилам CAB для BTC при любой стратегии." : "Ведение BTC — по стратегии Нигилиста выше."} />
+            note={active === "cab" ? `Ведение BTC — по правилам ${BOT_BRAND_NAMES.cab} при любой стратегии.` : `Ведение BTC — по стратегии ${BOT_BRAND_NAMES.nihilist} выше.`} />
         )}
       </div>
       {error && <p className="mt-3 text-sm text-destructive">{error}</p>}
@@ -321,7 +322,7 @@ function TradingStep({ sub, onChanged }: { sub: Subscription; onChanged: () => v
           <Play className="h-4 w-4" /> Старт
         </button>
       )}
-      {!ready && !sub.tradingEnabled && <p className="mt-3 text-xs text-muted-foreground">Сначала ключ (шаг 2) и стратегия CAB (шаг 4).</p>}
+      {!ready && !sub.tradingEnabled && <p className="mt-3 text-xs text-muted-foreground">Сначала ключ (шаг 2) и стратегия {BOT_BRAND_NAMES.cab} (шаг 4).</p>}
       <p className="mt-4 text-xs text-muted-foreground">
         {sub.tradingAccount === "real"
           ? <b className="text-destructive">Торговля идёт на РЕАЛЬНОМ счёте BingX. </b>
@@ -352,9 +353,11 @@ function Results() {
       <div className="mb-4 flex flex-wrap items-center justify-between gap-2">
         <h2 className="text-base font-bold">Мои результаты</h2>
         <div className="inline-grid grid-cols-3 border border-border">
-          {([["all", "Оба"], ["cab", "CAB"], ["nihilist", "Нигилист"]] as const).map(([id, label]) => (
-            <button key={id} type="button" aria-pressed={src === id} onClick={() => setSrc(id)}
-              className={`min-h-10 px-3 text-xs font-bold ${src === id ? "bg-primary text-primary-foreground" : "text-muted-foreground"}`}>{label}</button>
+          {(["all", "cab", "nihilist"] as const).map((id) => (
+            <button key={id} type="button" aria-label={id === "all" ? "Оба бота" : BOT_BRAND_NAMES[id]} aria-pressed={src === id} onClick={() => setSrc(id)}
+              className={`min-h-10 min-w-0 px-2 text-xs font-bold sm:px-3 ${src === id ? "bg-primary text-primary-foreground" : "text-muted-foreground"}`}>
+              {id === "all" ? "Оба" : <BotBrand source={id} size="xs" />}
+            </button>
           ))}
         </div>
       </div>
@@ -369,7 +372,7 @@ function Results() {
           {closed.slice(0, 10).map((t, i) => (
             <li key={i} className="flex justify-between gap-3 border-t border-border/70 px-3 py-2 text-sm first:border-t-0">
               <span className="truncate"><b>{t.symbol.replace(/USDT$/, "")}</b> <span className={t.side === "long" ? "text-success" : "text-destructive"}>{t.side === "long" ? "лонг" : "шорт"}</span>
-                <span className="text-muted-foreground"> · {t.source === "cab" ? "CAB" : "Нигилист"} · {t.closeText ?? ""}</span></span>
+                <span className="text-muted-foreground"> · {BOT_BRAND_NAMES[t.source === "cab" ? "cab" : "nihilist"]} · {t.closeText ?? ""}</span></span>
               <span className={`font-bold tabular ${toneClass(t.pnl)}`}>{formatUsdt(t.pnl)}</span>
             </li>
           ))}
@@ -509,8 +512,8 @@ function SourcesStep({ sub, onChanged }: { sub: Subscription; onChanged: () => v
     save.mutate([...next]);
   };
   const items: Array<{ id: "cab" | "nihilist"; title: string; text: string }> = [
-    { id: "cab", title: "Сигналы CAB", text: "Лонги по паттернам Crypto Alt Bullet, ведение — по выбранной стратегии." },
-    { id: "nihilist", title: "Сигналы Нигилиста", text: "Лонги и шорты по ордер-блокам (Smart Money), ведение сделки — по правилам владельца." },
+    { id: "cab", title: `Сигналы ${BOT_BRAND_NAMES.cab}`, text: "Лонги по паттернам Crypto Alts Bullet, ведение — по выбранной стратегии." },
+    { id: "nihilist", title: `Сигналы ${BOT_BRAND_NAMES.nihilist}`, text: "Лонги и шорты по ордер-блокам (Smart Money), ведение сделки — по правилам владельца." },
   ];
   return (
     <Step n={3} title="По каким сигналам торговать" done={q.data.chosen.length > 0}>

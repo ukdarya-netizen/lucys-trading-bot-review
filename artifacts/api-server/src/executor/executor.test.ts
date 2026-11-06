@@ -29,6 +29,7 @@ before(async () => {
   await ensureExecutorTables();
   ex = createExecutor({
     loadAccounts: async () => [account()],
+    entryAllowed: async () => true,
     bingx: (a) => createBingX({ env: a.env, key: a.key, secret: a.secret, host }),
     send: async (t) => { sent.push(t); },
   });

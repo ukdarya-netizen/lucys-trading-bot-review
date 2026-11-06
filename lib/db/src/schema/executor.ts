@@ -106,6 +106,25 @@ export const exTgOutboxTable = pgTable("ex_tg_outbox", {
 });
 
 /** The trading bot's Telegram reader state (update offset), owner 2026-11-03. */
+/** Owner 2026-11-04: the main account — PAPER / VST / REAL and its BingX key (encrypted), set in «Мой кабинет». */
+export const exOwnerAccountTable = pgTable("ex_owner_account", {
+  id: integer("id").primaryKey(),
+  mode: text("mode").notNull().default("vst"),
+  apiKeyEncrypted: text("api_key_encrypted"),
+  apiSecretEncrypted: text("api_secret_encrypted"),
+  keyLast4: text("key_last4"),
+  verifiedAt: timestamp("verified_at", { withTimezone: true }),
+  error: text("error"),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
+/** Owner 2026-11-04: the PAPER account's simulated exchange. */
+export const exPaperStateTable = pgTable("ex_paper_state", {
+  id: integer("id").primaryKey(),
+  state: jsonb("state").notNull(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
 export const botTelegramStateTable = pgTable("bot_telegram_state", {
   key: text("key").primaryKey(),
   value: text("value").notNull(),

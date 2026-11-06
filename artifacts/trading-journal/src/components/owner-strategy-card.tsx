@@ -3,6 +3,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, ApiFailure } from "@/lib/subscriber-api";
 import { StrategyPicker, type StrategyChoices } from "@/components/strategy-picker";
 import { StrategySection } from "@/components/StrategyCard";
+import { BOT_BRAND_NAMES } from "@/components/BotBrand";
 
 type OwnerStrategy = {
   strategy: string; patternExit: string | null; patterns: string[]; strategyText: string;
@@ -10,7 +11,9 @@ type OwnerStrategy = {
 };
 
 /** The owner's own bot strategy (applies to new entries within ~15 s). */
-export function OwnerStrategyCard({ toolbar, extra }: { toolbar?: ReactNode; extra?: (id: string, choices: StrategyChoices) => ReactNode } = {}) {
+export function OwnerStrategyCard({ toolbar, extra, readOnly, footer }: {
+  toolbar?: ReactNode; extra?: (id: string, choices: StrategyChoices) => ReactNode; readOnly?: boolean; footer?: ReactNode;
+} = {}) {
   const queryClient = useQueryClient();
   const [message, setMessage] = useState<{ text: string; bad: boolean } | null>(null);
   const query = useQuery({
@@ -33,10 +36,11 @@ export function OwnerStrategyCard({ toolbar, extra }: { toolbar?: ReactNode; ext
   }
   const d = query.data;
   return (
-    <StrategySection title="Как вести сделки CAB" current={d.strategyText} message={message}>
+    <StrategySection title={`Как вести сделки ${BOT_BRAND_NAMES.cab}`} current={d.strategyText} message={message}>
       {toolbar}
       <StrategyPicker extra={extra ? (id) => extra(id, d.choices) : undefined} value={{ strategy: d.strategy, patternExit: d.patternExit, patterns: d.patterns }}
-        choices={d.choices} pending={save.isPending} onSave={(choice) => save.mutate(choice)} />
+        choices={d.choices} pending={save.isPending} onSave={(choice) => save.mutate(choice)} readOnly={readOnly} />
+      {footer}
     </StrategySection>
   );
 }

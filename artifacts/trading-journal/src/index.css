@@ -59,43 +59,43 @@
 }
 
 :root {
-  /* Crypto Alts Bullet brand palette (same as the scanner): night-city navy,
-     neon violet, electric cyan and "BULLET" green. */
-  --background: 248 45% 4%;
-  --foreground: 220 40% 94%;
-  --card: 250 40% 7%;
-  --card-foreground: 220 40% 94%;
-  --card-border: 258 38% 20%;
-  --popover: 250 42% 8%;
-  --popover-foreground: 220 40% 94%;
-  --popover-border: 262 45% 26%;
-  --primary: 186 95% 56%;
-  --primary-foreground: 248 50% 6%;
-  --secondary: 258 32% 14%;
-  --secondary-foreground: 220 40% 94%;
-  --muted: 256 30% 12%;
-  --muted-foreground: 228 18% 66%;
-  --accent: 272 92% 68%;
-  --accent-foreground: 248 50% 6%;
-  --destructive: 352 95% 62%;
+  /* Lucy's Trading Bot (owner 2026-11-04): deep night navy, electric blue glow, glass panels. */
+  --background: 222 68% 4%;
+  --foreground: 210 40% 95%;
+  --card: 220 62% 8%;
+  --card-foreground: 210 40% 95%;
+  --card-border: 210 70% 24%;
+  --popover: 220 62% 8%;
+  --popover-foreground: 210 40% 95%;
+  --popover-border: 208 80% 30%;
+  --primary: 203 100% 60%;
+  --primary-foreground: 222 70% 6%;
+  --secondary: 218 52% 13%;
+  --secondary-foreground: 210 40% 95%;
+  --muted: 218 48% 11%;
+  --muted-foreground: 213 26% 68%;
+  --accent: 192 100% 62%;
+  --accent-foreground: 222 70% 6%;
+  --destructive: 352 92% 63%;
   --destructive-foreground: 0 0% 100%;
-  --success: 140 100% 55%;
-  --success-foreground: 248 50% 6%;
-  --warning: 40 100% 55%;
-  --border: 258 38% 20%;
-  --input: 258 30% 17%;
-  --ring: 272 92% 68%;
-  --chart-1: 186 95% 56%;
-  --chart-2: 140 100% 55%;
-  --chart-3: 40 100% 55%;
-  --chart-4: 272 92% 68%;
-  --chart-5: 352 95% 62%;
-  --neon-violet: 272 92% 68%;
-  --neon-cyan: 186 95% 56%;
-  --neon-green: 140 100% 55%;
+  --success: 152 88% 50%;
+  --success-foreground: 222 70% 6%;
+  --warning: 40 100% 58%;
+  --border: 210 72% 21%;
+  --input: 214 55% 18%;
+  --ring: 203 100% 60%;
+  --chart-1: 203 100% 60%;
+  --chart-2: 152 88% 50%;
+  --chart-3: 40 100% 58%;
+  --chart-4: 192 100% 62%;
+  --chart-5: 352 92% 63%;
+  --neon-violet: 212 100% 64%;
+  --neon-cyan: 192 100% 62%;
+  --neon-green: 152 88% 50%;
+  --glow: 205 100% 58%;
   --app-font-sans: "Exo 2", system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   --app-font-mono: "Space Mono", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-  --radius: 0.375rem;
+  --radius: 0.75rem;
 }
 
 @layer base {
@@ -107,11 +107,17 @@
     min-height: 100dvh;
     font-variant-numeric: tabular-nums;
     background-image:
-      radial-gradient(60rem 36rem at 0% -10%, hsl(272 92% 60% / 0.13), transparent 60%),
-      radial-gradient(50rem 30rem at 100% 110%, hsl(186 95% 50% / 0.10), transparent 60%),
-      linear-gradient(hsl(258 40% 30% / 0.07) 1px, transparent 1px),
-      linear-gradient(90deg, hsl(258 40% 30% / 0.07) 1px, transparent 1px);
-    background-size: auto, auto, 32px 32px, 32px 32px;
+      url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 1440 320' preserveAspectRatio='none'%3E%3Cg fill='none' stroke='%2333a6ff'%3E%3Cpath stroke-opacity='.22' d='M0 230 C240 150 420 300 720 220 S1200 120 1440 200'/%3E%3Cpath stroke-opacity='.14' d='M0 260 C260 190 470 320 760 250 S1210 160 1440 240'/%3E%3Cpath stroke-opacity='.10' d='M0 290 C300 230 520 330 800 280 S1230 200 1440 280'/%3E%3Cpath stroke-opacity='.08' d='M0 200 C220 120 400 260 700 190 S1180 90 1440 160'/%3E%3C/g%3E%3C/svg%3E"),
+      radial-gradient(48rem 32rem at 100% 0%, hsl(205 100% 50% / 0.16), transparent 62%),
+      radial-gradient(44rem 30rem at 0% 100%, hsl(215 100% 50% / 0.12), transparent 62%),
+      radial-gradient(70rem 40rem at 50% 50%, hsl(220 70% 9% / 0.6), transparent 70%),
+      radial-gradient(1px 1px at 20% 30%, hsl(205 100% 80% / .5), transparent),
+      radial-gradient(1px 1px at 70% 15%, hsl(205 100% 80% / .4), transparent),
+      radial-gradient(1px 1px at 85% 65%, hsl(205 100% 80% / .35), transparent),
+      radial-gradient(1px 1px at 35% 80%, hsl(205 100% 80% / .3), transparent);
+    background-size: 100% 42vh, auto, auto, auto, auto, auto, auto, auto;
+    background-position: bottom, 0 0, 0 0, 0 0, 0 0, 0 0, 0 0, 0 0;
+    background-repeat: no-repeat;
     background-attachment: fixed;
   }
 }
@@ -120,22 +126,19 @@
   /* Logo-style text, shared with the scanner. */
   .brand-title {
     font-family: var(--app-font-sans);
-    font-style: italic;
-    font-weight: 900;
-    letter-spacing: 0.02em;
-    background: linear-gradient(180deg, #f2f7ff 0%, #a9c8ff 45%, #5b8cff 100%);
-    -webkit-background-clip: text;
-    background-clip: text;
-    color: transparent;
-    filter: drop-shadow(0 0 6px hsl(222 100% 70% / 0.35));
+    font-weight: 600;
+    letter-spacing: 0.32em;
+    color: hsl(var(--muted-foreground));
   }
   .brand-bullet {
     font-family: var(--app-font-sans);
-    font-style: italic;
-    font-weight: 900;
-    letter-spacing: 0.03em;
-    color: hsl(var(--neon-green));
-    text-shadow: 0 0 6px hsl(var(--neon-green) / 0.55), 0 0 18px hsl(var(--neon-green) / 0.25);
+    font-weight: 700;
+    letter-spacing: 0.14em;
+    background: linear-gradient(180deg, #f4f9ff 0%, #9fd2ff 55%, #3aa3ff 100%);
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+    filter: drop-shadow(0 0 8px hsl(var(--glow) / 0.45));
   }
   .neon-edge {
     border-image: linear-gradient(90deg, hsl(var(--neon-violet)), hsl(var(--neon-cyan))) 1;
@@ -289,4 +292,200 @@
   .paper-surface { border-color: hsl(var(--success) / .35); }
   .legacy-surface { border-color: hsl(var(--accent) / .35); }
   .live-blocked { border-color: hsl(44 100% 68% / .45); }
+}
+
+/* ---------------------------------------------------------------------------------------------
+   Lucy's Trading Bot look (owner 2026-11-04): glass panels with a thin glowing blue edge, rounded
+   corners, uppercase letter-spaced titles, a glowing active menu item. Unlayered on purpose: it
+   wins over the page's utility classes, so every page gets the look without being rewritten.
+   --------------------------------------------------------------------------------------------- */
+.cyber-shell .cyber-sidebar {
+  background: linear-gradient(180deg, hsl(222 70% 5% / .92), hsl(222 72% 3% / .92));
+  border-right: 1px solid hsl(var(--glow) / .22);
+  box-shadow: 1px 0 24px hsl(var(--glow) / .08);
+  backdrop-filter: blur(10px);
+}
+.cyber-shell .cyber-brand { border-bottom: 1px solid hsl(var(--glow) / .16); border-image: none; background: transparent; }
+.cyber-shell .cyber-sidebar nav > div > p { letter-spacing: .24em; color: hsl(var(--muted-foreground) / .8); }
+.cyber-shell .cyber-nav-link { border-radius: 10px; transition: background .2s, box-shadow .2s, border-color .2s; }
+.cyber-shell .cyber-nav-link:hover { background: hsl(var(--glow) / .07); }
+.cyber-shell .cyber-nav-link[data-active="true"] {
+  color: hsl(var(--foreground));
+  background: linear-gradient(90deg, hsl(var(--glow) / .26), hsl(var(--glow) / .05));
+  border-color: hsl(var(--glow) / .6);
+  box-shadow: 0 0 18px hsl(var(--glow) / .28), inset 3px 0 0 hsl(var(--primary));
+}
+.cyber-shell .cyber-nav-link[data-active="true"] svg { color: hsl(var(--primary)); filter: drop-shadow(0 0 6px hsl(var(--glow) / .8)); }
+.cyber-shell .cyber-mobile-header {
+  background: hsl(222 70% 4% / .72);
+  border-bottom: 1px solid hsl(var(--glow) / .16);
+  backdrop-filter: blur(14px);
+}
+.cyber-shell .cyber-mobile-header h1 {
+  text-transform: uppercase;
+  letter-spacing: .16em;
+  font-weight: 600;
+  background: linear-gradient(180deg, #f4f9ff, #9fd2ff);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+.cyber-shell .cyber-mobile-nav { background: hsl(222 70% 4% / .9); border-top: 1px solid hsl(var(--glow) / .2); }
+
+/* Glass panels. */
+.cyber-shell main .bg-card,
+.cyber-shell main .panel,
+.cyber-shell main .position-book {
+  background: linear-gradient(160deg, hsl(214 70% 12% / .66), hsl(222 72% 6% / .74));
+  border: 1px solid hsl(var(--glow) / .24);
+  border-radius: 14px;
+  box-shadow: inset 0 1px 0 hsl(205 100% 85% / .06), 0 10px 30px hsl(222 90% 2% / .45), 0 0 22px hsl(var(--glow) / .06);
+  backdrop-filter: blur(10px);
+}
+.cyber-shell main .bg-card .bg-card,
+.cyber-shell main .bg-background {
+  background: hsl(222 72% 5% / .55);
+  border-color: hsl(var(--glow) / .16);
+  border-radius: 10px;
+  box-shadow: none;
+}
+.cyber-shell main .panel table, .cyber-shell main .bg-card table { border-radius: 10px; overflow: hidden; }
+.cyber-shell main table thead { background: hsl(var(--glow) / .07); }
+.cyber-shell main table th { color: hsl(var(--muted-foreground)); letter-spacing: .12em; }
+.cyber-shell main table tbody tr:hover { background: hsl(var(--glow) / .06); }
+
+.cyber-shell main section.border, .cyber-shell main div.border.p-4, .cyber-shell main p.border { border-radius: 14px; }
+
+/* Titles: uppercase, letter-spaced, like a terminal. */
+.cyber-shell main h2:not(.lucy-hero-title) { text-transform: uppercase; letter-spacing: .14em; font-size: .8rem; font-weight: 600; }
+.cyber-shell main .uppercase { letter-spacing: .12em; }
+
+/* Buttons and chosen segments glow. */
+.cyber-shell main .bg-primary {
+  background: linear-gradient(180deg, hsl(203 100% 64%), hsl(210 100% 50%));
+  box-shadow: 0 0 16px hsl(var(--glow) / .35);
+}
+.cyber-shell main button { border-radius: 10px; }
+.cyber-shell main .inline-grid, .cyber-shell main [role="tablist"] button { border-radius: 10px; }
+.cyber-shell main .inline-grid { overflow: hidden; }
+.cyber-shell main .inline-grid > button { border-radius: 0; }
+.cyber-shell main input, .cyber-shell main select, .cyber-shell main textarea, .cyber-shell main label.border { border-radius: 8px; }
+.cyber-shell main [role="tablist"] { border-color: hsl(var(--glow) / .2); }
+.cyber-shell main [role="tab"][aria-selected="true"] {
+  color: hsl(var(--primary));
+  background: linear-gradient(180deg, hsl(var(--glow) / .16), transparent);
+  border-color: hsl(var(--glow) / .35);
+  box-shadow: inset 0 2px 0 hsl(var(--primary));
+  border-radius: 10px 10px 0 0;
+}
+
+/* Overview header with the owner's picture. */
+.lucy-hero {
+  position: relative;
+  overflow: hidden;
+  min-height: 250px;
+  border: 1px solid hsl(var(--glow) / .28);
+  border-radius: 18px;
+  background: linear-gradient(90deg, hsl(222 72% 4%) 0%, hsl(220 70% 7%) 100%);
+  box-shadow: 0 0 30px hsl(var(--glow) / .1), inset 0 1px 0 hsl(205 100% 85% / .07);
+}
+.lucy-hero-img {
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: min(58%, 620px);
+  height: 100%;
+  object-fit: cover;
+  object-position: 38% 42%;
+  -webkit-mask-image: linear-gradient(90deg, #000 45%, transparent 100%);
+  mask-image: linear-gradient(90deg, #000 45%, transparent 100%);
+  opacity: .9;
+}
+.lucy-hero-body { position: relative; z-index: 1; margin-left: auto; width: min(100%, 560px); padding: 32px 32px 28px; }
+.lucy-hero-kicker { font-size: 11px; letter-spacing: .32em; color: hsl(var(--muted-foreground)); text-transform: uppercase; display: flex; align-items: center; gap: 12px; }
+.lucy-hero-kicker::after { content: ""; height: 1px; width: 64px; background: linear-gradient(90deg, hsl(var(--glow) / .7), transparent); }
+.lucy-hero-title {
+  margin-top: 14px;
+  font-size: clamp(28px, 4vw, 46px);
+  line-height: 1.02;
+  font-weight: 700;
+  letter-spacing: .04em;
+  text-transform: uppercase;
+  background: linear-gradient(180deg, #f6faff 0%, #b9dcff 55%, #6fb8ff 100%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  filter: drop-shadow(0 0 14px hsl(var(--glow) / .25));
+}
+.lucy-hero-text { margin-top: 12px; color: hsl(210 30% 82%); font-size: 14px; max-width: 30rem; }
+.lucy-online {
+  margin-top: 18px;
+  display: inline-flex; align-items: center; gap: 8px;
+  padding: 7px 14px; border-radius: 999px;
+  border: 1px solid hsl(var(--success) / .45);
+  background: hsl(var(--success) / .08);
+  color: hsl(var(--success));
+  font-size: 11px; font-weight: 700; letter-spacing: .2em; text-transform: uppercase;
+  box-shadow: 0 0 16px hsl(var(--success) / .18);
+}
+.lucy-online i { width: 7px; height: 7px; border-radius: 50%; background: currentColor; box-shadow: 0 0 8px currentColor; }
+@media (max-width: 767px) {
+  .lucy-hero-img { width: 100%; opacity: .35; -webkit-mask-image: none; mask-image: none; }
+  .lucy-hero-body { padding: 24px 20px; }
+}
+
+/* KPI tiles with an icon in a glowing ring. */
+.lucy-kpi-icon {
+  display: grid; place-items: center; flex-shrink: 0;
+  width: 42px; height: 42px; border-radius: 50%;
+  border: 1px solid hsl(var(--glow) / .45);
+  color: hsl(var(--primary));
+  background: radial-gradient(circle, hsl(var(--glow) / .16), transparent 70%);
+  box-shadow: 0 0 14px hsl(var(--glow) / .25);
+}
+
+/* Source identities: Exo 2 for Crypto Alts Bullet; Space Mono for Nihilyst. */
+.bot-brand {
+  display: inline-flex;
+  min-width: 0;
+  align-items: center;
+  gap: .55rem;
+  vertical-align: middle;
+}
+.bot-brand-avatar {
+  flex: none;
+  width: 2rem;
+  height: 2rem;
+  object-fit: cover;
+  border-radius: 50%;
+}
+.bot-brand--xs .bot-brand-avatar { width: 1.5rem; height: 1.5rem; }
+.bot-brand--md .bot-brand-avatar { width: 2.5rem; height: 2.5rem; }
+.bot-brand--cab .bot-brand-avatar {
+  border: 1px solid rgb(43 196 255 / .8);
+  box-shadow: 0 0 12px rgb(43 196 255 / .4);
+}
+.bot-brand--nihilist .bot-brand-avatar {
+  border: 1px solid rgb(229 44 57 / .85);
+  box-shadow: 0 0 12px rgb(229 44 57 / .4);
+}
+.bot-brand-name {
+  min-width: 0;
+  line-height: 1.15;
+}
+.bot-brand--cab .bot-brand-name {
+  color: #a9eaff;
+  font-family: "Exo 2", var(--app-font-sans);
+  font-weight: 900;
+  font-style: italic;
+  letter-spacing: .035em;
+  text-transform: uppercase;
+  text-shadow: 0 0 12px rgb(39 176 255 / .35);
+}
+.bot-brand--nihilist .bot-brand-name {
+  color: #ffb5ba;
+  font-family: "Space Mono", var(--app-font-mono);
+  font-weight: 700;
+  letter-spacing: .035em;
+  text-transform: uppercase;
+  text-shadow: 0 0 10px rgb(255 36 49 / .35);
 }
