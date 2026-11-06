@@ -1,4 +1,5 @@
 import { useState, type ReactNode } from "react";
+import { CAB_EXITS, CAB_PATTERNS, CAB_PERIODS, d8, money, ResultLine, useCabReport, useNihilistReport } from "./subscriber/SubBots";
 import { useClerk } from "@clerk/react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { CheckCircle2, Clock, KeyRound, LogOut, Play, ShieldX, Square, Target } from "lucide-react";
@@ -140,6 +141,29 @@ type SourcesInfo = { chosen: string[]; available: { cab: boolean; nihilist: bool
 /** How trades are led (owner 2026-11-03): one tab per chosen bot — its strategy and Bitcoin in its trades, same look as the owner's «Стратегии». */
 function StrategyStep({ sub, choices, onChanged }: { sub: Subscription; choices: StrategyChoices; onChanged: () => void }) {
   const [error, setError] = useState<string | null>(null);
+  // Owner 2026-11-06: the subscriber chooses by the numbers — each card shows what that way of leading
+  // gave on the bot's real signals, at the subscriber's own size.
+  const [days, setDays] = useState(60);
+  const cabRep = useCabReport(days);
+  const nhRep = useNihilistReport();
+  const m = money(sub.positionSettings, sub.tradingAccount);
+  const cabResults = (id: string) => {
+    const r = cabRep.data;
+    if (!r) return null;
+    if (id === "patterns") {
+      return (
+        <span className="mt-3 block space-y-1 border-t border-border pt-2 text-xs">
+          {CAB_PATTERNS.map(([pid, pname]) => (
+            <span key={pid} className="block">
+              <b>{pname}</b>
+              {CAB_EXITS.map(([e, label]) => <ResultLine key={e} name={label} s={r.byPattern?.[pid]?.[e]} m={m} />)}
+            </span>
+          ))}
+        </span>
+      );
+    }
+    return <span className="mt-3 block border-t border-border pt-2 text-xs"><ResultLine name="Все паттерны" s={r.exits?.[id]} m={m} /></span>;
+  };
   const sources = (["cab", "nihilist"] as const).filter((s) => sub.tradeSources.includes(s));
   const [tab, setTab] = useState<"cab" | "nihilist">(sources[0] ?? "cab");
   const active = sources.includes(tab) ? tab : sources[0] ?? "cab";
@@ -169,7 +193,23 @@ function StrategyStep({ sub, choices, onChanged }: { sub: Subscription; choices:
       <div className="space-y-4">
         {active === "cab" ? (
           <StrategySection title={`Как вести сделки ${BOT_BRAND_NAMES.cab}`} current={sub.strategyText ?? null}>
-            <StrategyPicker
+            <div className="flex flex-wrap items-center gap-3">
+              <div className="inline-grid grid-cols-4 border border-border">
+                {CAB_PERIODS.map(([n, label]) => (
+                  <button key={n} type="button" aria-pressed={days === n} onClick={() => setDays(n)}
+                    className={`min-h-10 px-2 text-xs font-bold sm:px-3 ${days === n ? "bg-primary text-primary-foreground" : "text-muted-foreground"}`}>{label}</button>
+                ))}
+              </div>
+              <span className="text-xs text-muted-foreground">
+                {cabRep.isLoading ? "Считается…" : cabRep.error ? (cabRep.error as Error).message
+                  : cabRep.data ? `Реальные сигналы ${BOT_BRAND_NAMES.cab} ${d8(cabRep.data.from)} — ${d8(cabRep.data.to)}, закрытых ${cabRep.data.trades}` : ""}
+              </span>
+            </div>
+            <p className="text-xs text-muted-foreground">
+              Под каждой стратегией — что она дала бы на всех сигналах бота при вашем размере ({m.size}), с комиссиями, без реинвеста.
+              «Устойчиво» — в плюсе в обеих половинах периода. Поменяете размер — цифры пересчитаются.
+            </p>
+            <StrategyPicker extra={cabResults}
               value={{ strategy: sub.strategy, patternExit: sub.patternExit, patterns: sub.patterns }}
               choices={choices} disabled={sub.tradingEnabled} pending={choose.isPending}
               onSave={(choice) => choose.mutate(choice)} />
@@ -179,7 +219,22 @@ function StrategyStep({ sub, choices, onChanged }: { sub: Subscription; choices:
           <StrategySection title={`Как вести сделки ${BOT_BRAND_NAMES.nihilist}`} current={nh?.label ?? null}>
             <p className="text-sm text-muted-foreground">Стратегию для сигналов {BOT_BRAND_NAMES.nihilist} выбирает владелец — она одна для всех.</p>
             {nh && <div className="grid gap-3 sm:grid-cols-2">
-              <StrategyCard index={1} label={nh.label} description={NIHILIST_DESCRIPTIONS[nh.id]} saved active disabled />
+              <StrategyCard index={1} label={nh.label} description={NIHILIST_DESCRIPTIONS[nh.id]} saved active disabled>
+                {(() => {
+                  const ds = nhRep.data?.report?.datasets?.find((x) => x.name === "live") ?? null;
+                  const hist = nhRep.data?.report?.datasets?.find((x) => x.name === "history") ?? null;
+                  const line = (d: typeof ds, g: "long_filtered" | "short") => d?.groups?.[g]?.find((x) => x.id === nh.id)?.stats;
+                  if (!ds && !hist) return null;
+                  return (
+                    <span className="mt-3 block space-y-1 border-t border-border pt-2 text-xs">
+                      {ds && <><span className="block text-muted-foreground">Реальные сигналы {d8(ds.from)} — {d8(ds.to)}</span>
+                        <ResultLine name="Лонги" s={line(ds, "long_filtered")} m={m} /><ResultLine name="Шорты" s={line(ds, "short")} m={m} /></>}
+                      {hist && <><span className="block pt-1 text-muted-foreground">Бэктест {d8(hist.from)} — {d8(hist.to)}</span>
+                        <ResultLine name="Лонги" s={line(hist, "long_filtered")} m={m} /><ResultLine name="Шорты" s={line(hist, "short")} m={m} /></>}
+                    </span>
+                  );
+                })()}
+              </StrategyCard>
             </div>}
           </StrategySection>
         )}

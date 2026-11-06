@@ -32,7 +32,7 @@ const d8 = (s: string | null) => (s ? new Date(s).toLocaleDateString("ru-RU", { 
 const stable = (s: Stats) => (s.half1.avg ?? -1) > 0 && (s.half2.avg ?? -1) > 0;
 
 /** A price move in % → the subscriber's result: % of deposit (size in %) or USDT (fixed size). */
-function money(ps: PositionSettings | undefined, account: "vst" | "real") {
+export function money(ps: PositionSettings | undefined, account: "vst" | "real") {
   const lev = ps?.leverage ?? 10;
   if (!ps || ps.allocationMode === "percent") {
     const share = (ps?.allocationValue ?? 1) / 100;
@@ -41,7 +41,28 @@ function money(ps: PositionSettings | undefined, account: "vst" | "real") {
   const asset = account === "real" ? "USDT" : "VST";
   return { label: asset, of: (pricePct: number) => (pricePct / 100) * ps.allocationValue * lev, unit: ` ${asset}`, size: `${ps.allocationValue} ${asset} · ${lev}x` };
 }
-type Money = ReturnType<typeof money>;
+export type Money = ReturnType<typeof money>;
+
+export function useCabReport(days: number) {
+  return useQuery({ queryKey: ["me-bot-cab", days], queryFn: () => api<CabReport>(`/me/bot-report/cab${days ? `?days=${days}` : ""}`), refetchInterval: 300_000 });
+}
+export function useNihilistReport() {
+  return useQuery({ queryKey: ["me-bot-nihilist"], queryFn: () => api<{ running: boolean; report: NhReport | null; historyDays: number }>("/me/bot-report/nihilist"), refetchInterval: 60_000 });
+}
+
+/** One line of results inside a strategy card of the cabinet (owner 2026-11-06: choose by the numbers). */
+export function ResultLine({ name, s, m }: { name: string; s: Stats | undefined; m: Money }) {
+  if (!s || !s.n) return <span className="block text-muted-foreground">{name}: сделок нет</span>;
+  const res = m.of(s.sum), dd = m.of(s.maxDd);
+  return (
+    <span className="block tabular">
+      <b>{name}</b> · {s.n} сделок · в плюс {Math.round(s.winPct)}% · результат <b className={tone(res)}>{fmt(res)}{m.unit}</b>
+      {" "}· просадка <span className="text-destructive">−{Math.abs(dd).toLocaleString("ru-RU", { maximumFractionDigits: 1 })}{m.unit}</span>
+      {" "}· устойчиво {stable(s) ? <span className="text-success">да</span> : <span className="text-destructive">нет</span>}
+    </span>
+  );
+}
+export { CAB_EXITS, CAB_PATTERNS, PERIODS as CAB_PERIODS, d8 };
 
 function Row({ name, s, m }: { name: string; s: Stats | undefined; m: Money }) {
   if (!s || !s.n) return <tr className="border-t border-border"><td className="py-2 pr-2 font-bold">{name}</td><td colSpan={4} className="py-2 text-muted-foreground">сделок нет</td></tr>;
@@ -79,7 +100,7 @@ function Fail({ q }: { q: { isLoading: boolean; error: unknown } }) {
 
 function Cab({ m }: { m: Money }) {
   const [days, setDays] = useState(60);
-  const q = useQuery({ queryKey: ["me-bot-cab", days], queryFn: () => api<CabReport>(`/me/bot-report/cab${days ? `?days=${days}` : ""}`), refetchInterval: 300_000 });
+  const q = useCabReport(days);
   const r = q.data;
   return (
     <div className="space-y-3">
@@ -110,7 +131,7 @@ function Cab({ m }: { m: Money }) {
 }
 
 function Nihilist({ m }: { m: Money }) {
-  const q = useQuery({ queryKey: ["me-bot-nihilist"], queryFn: () => api<{ running: boolean; report: NhReport | null; historyDays: number }>("/me/bot-report/nihilist"), refetchInterval: 60_000 });
+  const q = useNihilistReport();
   const [ds, setDs] = useState<"history" | "live">("live");
   const report = q.data?.report ?? null;
   const dataset = report?.datasets?.find((x) => x.name === ds) ?? report?.datasets?.[0] ?? null;
