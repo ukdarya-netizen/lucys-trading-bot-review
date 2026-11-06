@@ -1,22 +1,24 @@
 /**
  * Owner 2026-11-06: what a non-owner sees. Not approved yet (or rejected/blocked) → the cabinet page as
  * before. Approved → an app like the owner's (sidebar on desktop, bottom tabs in the Telegram Mini App)
- * with four pages, all about the subscriber's own account only: Обзор, Позиции, История, Кабинет.
+ * with five pages: Обзор, Позиции, История (own account only), Боты (the bots' own results), Кабинет.
  */
 import { Switch, Route, Link, Redirect, useLocation } from "wouter";
 import { useClerk, useUser } from "@clerk/react";
-import { LayoutDashboard, Crosshair, History, UserRound, LogOut, Terminal } from "lucide-react";
+import { LayoutDashboard, Crosshair, History, UserRound, LogOut, Terminal, SlidersHorizontal } from "lucide-react";
 import { BrandLockup, BrandMark } from "@/components/brand";
 import SubscriberCabinet, { SubscriberCabinetBody } from "../SubscriberCabinet";
 import SubOverview from "./SubOverview";
 import SubPositions from "./SubPositions";
 import SubHistory from "./SubHistory";
+import SubBots from "./SubBots";
 import { useSubscription } from "./shared";
 
 const SUB_NAV = [
   { href: "/journal/overview", label: "Обзор", sub: "мой результат и статус бота", icon: LayoutDashboard },
   { href: "/journal/positions", label: "Позиции", sub: "открытые сейчас", icon: Crosshair },
   { href: "/journal/trades", label: "История", sub: "закрытые сделки", icon: History },
+  { href: "/journal/bots", label: "Боты", sub: "результаты CAB и Нигилиста", icon: SlidersHorizontal },
   { href: "/journal/my-bot", label: "Кабинет", sub: "ключ, боты, размер, вкл/выкл", icon: UserRound },
 ] as const;
 
@@ -83,6 +85,7 @@ export default function SubscriberApp() {
             <Route path="/journal/overview" component={SubOverview} />
             <Route path="/journal/positions" component={SubPositions} />
             <Route path="/journal/trades" component={SubHistory} />
+            <Route path="/journal/bots" component={SubBots} />
             <Route path="/journal/my-bot">{() => <SubscriberCabinetBody inApp />}</Route>
             <Route><Redirect to="/journal/overview" /></Route>
           </Switch>

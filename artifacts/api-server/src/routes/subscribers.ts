@@ -6,6 +6,7 @@ import { announceRequest, botUsername, decide, send as sendTelegram, TEXT as SUB
 import { BTC_MAX_LEVERAGE, getBtcSettings, getSourceSettings, saveBtcSettings } from "../executor/store";
 import { closeReasonText } from "../executor/texts";
 import { subscriberTrades } from "../lib/subscriber-trades";
+import { cabReport, nihilistCall } from "./executor";
 import { nihilistStrategy } from "../executor/plan";
 
 type SrcStat = { closed: number; pnl: number };
@@ -279,6 +280,23 @@ router.get("/me/trades", async (req, res) => {
   } catch {
     res.status(503).json({ error: { code: "trades_unavailable", message: "Не удалось загрузить сделки" } });
   }
+});
+
+// Owner 2026-11-06: the bots' own results (every way to lead the trades, on the bots' real signals and the
+// Nihilist backtest) for approved subscribers — read only; no "run" for them. Same reports as the owner's «Боты».
+router.get("/me/bot-report/cab", async (req, res) => {
+  res.setHeader("Cache-Control", "no-store");
+  const row = await subscriberFor(req);
+  if (row.status !== "approved") return refuse(res, 403, "not_approved", "Заявка ещё не одобрена");
+  const out = await cabReport(req.query.days);
+  res.status(out.status).json(out.body);
+});
+router.get("/me/bot-report/nihilist", async (req, res) => {
+  res.setHeader("Cache-Control", "no-store");
+  const row = await subscriberFor(req);
+  if (row.status !== "approved") return refuse(res, 403, "not_approved", "Заявка ещё не одобрена");
+  const out = await nihilistCall("/api/trading/strategy-report", "GET");
+  res.status(out.status).json(out.body);
 });
 
 router.get("/me/performance", async (req, res) => {

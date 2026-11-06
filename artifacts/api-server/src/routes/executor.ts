@@ -141,7 +141,7 @@ function nihilistBase(): string | null {
   const sync = process.env.NIHILIST_POSITION_SYNC_URL?.trim();
   try { return sync ? new URL(sync).origin : null; } catch { return null; }
 }
-async function nihilistCall(path: string, method: "GET" | "POST") {
+export async function nihilistCall(path: string, method: "GET" | "POST") {
   const base = nihilistBase(), token = process.env.NIHILIST_TRADING_TOKEN?.trim();
   if (!base || !token) return { status: 503, body: { error: { code: "nihilist_not_configured", message: "Не заданы NIHILIST_POSITION_SYNC_URL и NIHILIST_TRADING_TOKEN" } } };
   try {
@@ -162,20 +162,25 @@ router.post("/journal/executor/nihilist-report/run", requireJournalSession, requ
   res.status(out.status).json(out.body);
 });
 // CAB's strategy report (owner 2026-11-03): each way to lead a CAB trade on CAB's real closed signals.
-router.get("/journal/executor/cab-report", requireJournalSession, requireJournalOwner, async (req, res) => {
-  res.setHeader("Cache-Control", "no-store");
+// Shared with the subscriber pages (owner 2026-11-06): the report holds CAB's signals only, nothing of any account.
+export async function cabReport(daysRaw: unknown): Promise<{ status: number; body: any }> {
   const token = process.env.TRADING_INGEST_TOKEN?.trim();
-  if (!token) { res.status(503).json({ error: { code: "cab_not_configured", message: "Не задан TRADING_INGEST_TOKEN" } }); return; }
-  const days = Number(req.query.days);
+  if (!token) return { status: 503, body: { error: { code: "cab_not_configured", message: "Не задан TRADING_INGEST_TOKEN" } } };
+  const days = Number(daysRaw);
   const url = new URL("/api/trading/strategy-report", cabOrigin());
   if (Number.isInteger(days) && days > 0) url.searchParams.set("days", String(days));
   try {
     const r = await fetch(url, { headers: { "x-trading-token": token, accept: "application/json" }, signal: AbortSignal.timeout(20_000) });
     const body = (await r.json().catch(() => ({}))) as any;
-    if (r.ok) { res.json(body); return; }
-    res.status(r.status).json({ error: { code: String(body?.error ?? r.status), message: r.status === 401 ? "CAB не принял токен" : r.status === 404 ? "В CAB ещё нет расчёта стратегий — опубликуйте CAB" : "CAB не ответил" } });
+    if (r.ok) return { status: 200, body };
+    return { status: r.status, body: { error: { code: String(body?.error ?? r.status), message: r.status === 401 ? "CAB не принял токен" : r.status === 404 ? "В CAB ещё нет расчёта стратегий — опубликуйте CAB" : "CAB не ответил" } } };
   } catch {
-    res.status(502).json({ error: { code: "cab_unreachable", message: "CAB недоступен" } });
+    return { status: 502, body: { error: { code: "cab_unreachable", message: "CAB недоступен" } } };
   }
+}
+router.get("/journal/executor/cab-report", requireJournalSession, requireJournalOwner, async (req, res) => {
+  res.setHeader("Cache-Control", "no-store");
+  const out = await cabReport(req.query.days);
+  res.status(out.status).json(out.body);
 });
 export default router;
