@@ -10,30 +10,57 @@ import { encryptSecret, forbiddenPermissions, plausibleBingXKey, readBingXKeyPer
 import { createBingX, type Env } from "./bingx";
 import { REASON_TEXT } from "./engine";
 import { ensureExecutorTables } from "./store";
-import type { OwnerMode } from "./accounts";
+import { BOTS, ownerBotModes, ownerKeyFor, saveOwnerBotMode, type Bot, type OwnerAccountRow, type OwnerMode } from "./accounts";
+import { getOwnerBotControl, productionTrading, saveOwnerBotControl } from "./trading-controls";
 
+/** Owner 2026-11-06: each bot has its own account and its own on/off. */
+export type OwnerBotInfo = {
+  mode: OwnerMode; enabled: boolean;
+  /** Why new trades of this bot cannot run on its account now (null — they can). */
+  blockedReason: string | null;
+  /** Open trades of this bot on each owner account ({ vst: 2 }): after a switch they are led to the end where they are. */
+  openByMode: Partial<Record<OwnerMode, number>>;
+};
 export type OwnerAccountInfo = {
+  /** The old single mode (kept for pages that still read it): CAB's account. */
   mode: OwnerMode; keyLast4: string | null; verifiedAt: string | null; error: string | null;
   /** A VST key is set in Secrets (used for VST when none is saved here). */
   secretsKey: boolean; secretsOff: boolean; keysStorable: boolean;
-  /** Trades of the main account still open (switching the mode is refused while they are). */
+  /** All open trades of the owner's accounts. */
   openTrades: number;
+  bots: Record<Bot, OwnerBotInfo>;
 };
 
 const OPEN = "('opening','open','closing','unknown')";
+const MODE_NAME: Record<OwnerMode, string> = { paper: "PAPER", vst: "VST", real: "REAL" };
 
 export async function ownerAccountInfo(): Promise<OwnerAccountInfo> {
   await ensureExecutorTables();
-  const r = await pool.query("SELECT mode, key_last4, verified_at, error FROM ex_owner_account WHERE id = 1");
-  const row = r.rows[0];
-  const open = await pool.query(`SELECT count(*)::int AS n FROM ex_trades WHERE account_id LIKE 'owner-%' AND status IN ${OPEN}`);
+  const r = await pool.query("SELECT mode, key_last4, verified_at, error, api_key_encrypted, api_secret_encrypted FROM ex_owner_account WHERE id = 1");
+  const row = r.rows[0] ?? null;
+  const open = await pool.query<{ account_id: string; source: string; n: number }>(
+    `SELECT account_id, source, count(*)::int AS n FROM ex_trades WHERE account_id LIKE 'owner-%' AND status IN ${OPEN} GROUP BY 1, 2`);
+  const modes = await ownerBotModes(row);
+  const bots = {} as Record<Bot, OwnerBotInfo>;
+  for (const bot of BOTS) {
+    const mode = modes[bot];
+    const control = await getOwnerBotControl(bot);
+    const openByMode: Partial<Record<OwnerMode, number>> = {};
+    for (const o of open.rows.filter((x) => x.source === bot)) openByMode[o.account_id.slice("owner-".length) as OwnerMode] = o.n;
+    const blockedReason = !productionTrading() ? "В dev торговля заблокирована — управление на опубликованном сайте."
+      : process.env.EXECUTOR_V2 !== "1" ? "Торговый бот выключен: в Secrets нет EXECUTOR_V2=1."
+      : mode !== "paper" && !ownerKeyFor(mode, row) ? `Для ${MODE_NAME[mode]} нужен ключ BingX — вставьте его выше.`
+      : null;
+    bots[bot] = { mode, enabled: control.enabled, blockedReason, openByMode };
+  }
   return {
-    mode: (row?.mode as OwnerMode) ?? "vst", keyLast4: row?.key_last4 ?? null,
+    mode: modes.cab, keyLast4: row?.key_last4 ?? null,
     verifiedAt: row?.verified_at ? new Date(row.verified_at).toISOString() : null, error: row?.error ?? null,
     secretsKey: Boolean(process.env.BINGX_API_KEY?.trim() && process.env.BINGX_API_SECRET?.trim()),
     secretsOff: process.env.EXECUTOR_OWNER_VST === "0",
     keysStorable: Boolean(subscriberKeysConfigured()),
-    openTrades: open.rows[0]?.n ?? 0,
+    openTrades: open.rows.reduce((a, x) => a + x.n, 0),
+    bots,
   };
 }
 
@@ -58,50 +85,79 @@ export const checkKey: KeyCheck = async (env, key, secret) => {
 
 export type SaveResult = { ok: true; info: OwnerAccountInfo; equity: number | null } | { ok: false; status: number; message: string };
 
+/**
+ * Owner 2026-11-06: one BingX key for the owner (it serves VST and REAL), and an account per bot.
+ * body: { apiKey?, apiSecret?, source?: "cab"|"nihilist", mode?: "paper"|"vst"|"real", confirmReal? }.
+ * A bot may change account while it has open trades: they stay on the old account and are led to the end there.
+ */
 export async function saveOwnerAccount(body: any, check: KeyCheck = checkKey): Promise<SaveResult> {
   await ensureExecutorTables();
-  const mode = body?.mode;
-  if (mode !== "paper" && mode !== "vst" && mode !== "real") return { ok: false, status: 400, message: "Выберите PAPER, VST или REAL" };
   const key = typeof body?.apiKey === "string" ? body.apiKey.trim() : "";
   const secret = typeof body?.apiSecret === "string" ? body.apiSecret.trim() : "";
+  const source = body?.source;
+  const mode = body?.mode;
+  if (source !== undefined && source !== "cab" && source !== "nihilist") return { ok: false, status: 400, message: "Неизвестный бот" };
+  if (mode !== undefined && mode !== "paper" && mode !== "vst" && mode !== "real") return { ok: false, status: 400, message: "Выберите PAPER, VST или REAL" };
+  if ((mode === undefined) !== (source === undefined)) return { ok: false, status: 400, message: "Укажите бота и счёт" };
+  if (!key && !secret && mode === undefined) return { ok: false, status: 400, message: "Нечего сохранять" };
   if (mode === "real" && body?.confirmReal !== true) return { ok: false, status: 400, message: "Подтвердите, что торговля идёт на реальные деньги" };
-  const cur = (await pool.query("SELECT mode, api_key_encrypted FROM ex_owner_account WHERE id = 1")).rows[0] ?? null;
-  const curMode: OwnerMode = cur?.mode ?? "vst";
-  if (mode !== curMode) {
-    const open = await pool.query(`SELECT count(*)::int AS n FROM ex_trades WHERE account_id LIKE 'owner-%' AND status IN ${OPEN}`);
-    if ((open.rows[0]?.n ?? 0) > 0) {
-      return { ok: false, status: 409, message: `Сначала дождитесь закрытия открытых сделок (${open.rows[0].n}) или закройте их: после смены счёта бот перестанет их вести.` };
-    }
-  }
+
+  let row = (await pool.query("SELECT mode, api_key_encrypted, api_secret_encrypted FROM ex_owner_account WHERE id = 1")).rows[0] ?? null;
+  const curModes = await ownerBotModes(row);
   let equity: number | null = null;
+
+  // 1) A new key: checked on the account it is saved for (REAL if a bot goes to REAL, else VST).
   if (key || secret) {
-    if (mode === "paper") return { ok: false, status: 400, message: "Для PAPER ключ не нужен" };
     if (!plausibleBingXKey(key) || !plausibleBingXKey(secret)) return { ok: false, status: 400, message: "Вставьте API Key и Secret Key из BingX целиком" };
     if (!subscriberKeysConfigured()) return { ok: false, status: 503, message: "В Secrets нет SUBSCRIBER_KEYS_SECRET — ключ негде хранить зашифрованным" };
-    const c = await check(mode, key, secret);
+    const env: Env = mode === "real" || (mode === undefined && Object.values(curModes).includes("real")) ? "real" : "vst";
+    const c = await check(env, key, secret);
     if (!c.ok) {
       await pool.query(
         `INSERT INTO ex_owner_account (id, mode, error, updated_at) VALUES (1, $1, $2, now())
-         ON CONFLICT (id) DO UPDATE SET error = EXCLUDED.error, updated_at = now()`, [curMode, c.message.slice(0, 300)]);
+         ON CONFLICT (id) DO UPDATE SET error = EXCLUDED.error, updated_at = now()`, [curModes.cab, c.message.slice(0, 300)]);
       return { ok: false, status: 422, message: c.message };
     }
     equity = c.equity;
     await pool.query(
       `INSERT INTO ex_owner_account (id, mode, api_key_encrypted, api_secret_encrypted, key_last4, verified_at, error, updated_at)
        VALUES (1, $1, $2, $3, $4, now(), NULL, now())
-       ON CONFLICT (id) DO UPDATE SET mode = EXCLUDED.mode, api_key_encrypted = EXCLUDED.api_key_encrypted,
+       ON CONFLICT (id) DO UPDATE SET api_key_encrypted = EXCLUDED.api_key_encrypted,
          api_secret_encrypted = EXCLUDED.api_secret_encrypted, key_last4 = EXCLUDED.key_last4, verified_at = now(), error = NULL, updated_at = now()`,
-      [mode, encryptSecret(key), encryptSecret(secret), key.slice(-4)]);
-  } else {
-    if (mode === "real" && !cur?.api_key_encrypted) return { ok: false, status: 400, message: "Для REAL вставьте API Key и Secret Key" };
-    if (mode === "vst" && !cur?.api_key_encrypted && !(process.env.BINGX_API_KEY?.trim() && process.env.BINGX_API_SECRET?.trim())) {
-      return { ok: false, status: 400, message: "Для VST вставьте API Key и Secret Key" };
+      [curModes.cab, encryptSecret(key), encryptSecret(secret), key.slice(-4)]);
+    row = (await pool.query("SELECT mode, api_key_encrypted, api_secret_encrypted FROM ex_owner_account WHERE id = 1")).rows[0] ?? null;
+  }
+
+  // 2) The bot's account. VST / REAL: the key must open that account's balance right now.
+  if (source && mode && mode !== curModes[source as Bot]) {
+    if (mode !== "paper") {
+      const k = ownerKeyFor(mode, row as OwnerAccountRow | null);
+      if (!k) return { ok: false, status: 400, message: `Для ${MODE_NAME[mode as OwnerMode]} вставьте API Key и Secret Key BingX` };
+      if (!(key || secret) || mode === "real") {
+        try {
+          equity = (await createBingX({ env: mode, key: k.key, secret: k.secret }).balance()).equity;
+        } catch (e) {
+          return { ok: false, status: 422, message: `BingX не открыл ${mode === "real" ? "реальный счёт" : "демо VST"} этим ключом: ${e instanceof Error ? e.message.slice(0, 160) : String(e)}` };
+        }
+      }
     }
-    await pool.query(
-      `INSERT INTO ex_owner_account (id, mode, updated_at) VALUES (1, $1, now())
-       ON CONFLICT (id) DO UPDATE SET mode = EXCLUDED.mode, updated_at = now()`, [mode]);
+    await saveOwnerBotMode(source as Bot, mode as OwnerMode);
   }
   return { ok: true, info: await ownerAccountInfo(), equity };
+}
+
+/** Owner 2026-11-06: new trades of one bot on/off (its account only; the other bot is not touched). */
+export async function setOwnerBotTrading(source: unknown, enabled: unknown): Promise<SaveResult> {
+  if (source !== "cab" && source !== "nihilist") return { ok: false, status: 400, message: "Неизвестный бот" };
+  if (typeof enabled !== "boolean") return { ok: false, status: 400, message: "Неверное значение" };
+  if (!productionTrading()) return { ok: false, status: 409, message: "Торговлю нельзя переключать из dev. Откройте опубликованный сайт." };
+  if (enabled) {
+    const info = await ownerAccountInfo();
+    const reason = info.bots[source].blockedReason;
+    if (reason) return { ok: false, status: 409, message: reason };
+  }
+  await saveOwnerBotControl(source, enabled);
+  return { ok: true, info: await ownerAccountInfo(), equity: null };
 }
 
 export type SignalRow = {

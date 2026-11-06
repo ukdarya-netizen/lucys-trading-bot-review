@@ -2,7 +2,7 @@ import { Router, type IRouter } from "express";
 import { requireJournalOwner, requireJournalSession } from "../middlewares/journalAccess";
 import { cabOrigin, executorHealth, executorStatus, executorTradeEvents, saveNihilistSettings, saveSourceSettingsFrom } from "../executor";
 import { saveBtcSettings } from "../executor/store";
-import { listSignals, ownerAccountInfo, saveOwnerAccount } from "../executor/owner-account";
+import { listSignals, ownerAccountInfo, saveOwnerAccount, setOwnerBotTrading } from "../executor/owner-account";
 import {
   GetExecutorTradingControlsResponse,
   UpdateExecutorTradingControlBody,
@@ -122,6 +122,13 @@ router.post("/journal/executor/owner-account", requireJournalSession, requireJou
   const out = await saveOwnerAccount(req.body);
   if (!out.ok) { res.status(out.status).json({ error: { code: "owner_account", message: out.message } }); return; }
   res.json({ ...out.info, equity: out.equity });
+});
+// Owner 2026-11-06: new trades of one bot on/off, on its own account (the other bot is not touched).
+router.post("/journal/executor/owner-bot/:source/trading", requireJournalSession, requireJournalOwner, async (req, res) => {
+  res.setHeader("Cache-Control", "no-store");
+  const out = await setOwnerBotTrading(req.params.source, req.body?.enabled);
+  if (!out.ok) { res.status(out.status).json({ error: { code: "owner_bot_trading", message: out.message } }); return; }
+  res.json(out.info);
 });
 // Every received signal and what each account did with it (owner 2026-11-04).
 router.get("/journal/executor/signals", requireJournalSession, requireJournalOwner, async (req, res) => {

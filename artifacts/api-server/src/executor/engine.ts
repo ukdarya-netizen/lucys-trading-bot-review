@@ -69,7 +69,7 @@ export const REASON_TEXT: Record<string, string> = {
 
 export function createExecutor(deps: {
   loadAccounts: () => Promise<Account[]>;
-  entryAllowed: (account: Account, releasedAt: number) => Promise<boolean>;
+  entryAllowed: (account: Account, releasedAt: number, source: string) => Promise<boolean>;
   bingx: (a: Account) => BingX;
   send: Sender;
   now?: () => number;
@@ -142,7 +142,9 @@ export function createExecutor(deps: {
   async function enter(rt: Runtime, sigIn: SignalIn): Promise<void> {
     const a = rt.acct;
     if (sigIn.releasedAt < a.startedAt) return;
-    if (!await deps.entryAllowed(a, sigIn.releasedAt).catch(() => false)) return;
+    // Owner 2026-11-06: an account opens trades only for its own bots (the owner sets an account per bot).
+    if (!a.sources.has(sigIn.source)) return;
+    if (!await deps.entryAllowed(a, sigIn.releasedAt, sigIn.source).catch(() => false)) return;
     // Another number of zeros on BingX (1000000MOG ↔ MOG, LUNC): BingX's symbol, prices rescaled.
     // A network error here is not «no such coin»: go on with the symbol as sent (the entry reports its own error).
     const mapped = await rt.ex.resolveSymbol(sigIn.symbol, "entry").catch(() => ({ symbol: sigIn.symbol, factor: 1 }));
@@ -166,7 +168,7 @@ export function createExecutor(deps: {
     });
     if (!t) return; // already handled
     try {
-      if (!src.enabled) return skip(rt, t, "source_disabled", false);
+      // The owner's per-bot on/off is checked in entryAllowed (owner 2026-11-06); src.enabled is no longer a gate.
       if (now() - sig.releasedAt > SIGNAL_TTL_MS) return skip(rt, t, "stale");
       if (sig.source === "cab" && a.strategy.patterns && (!sig.pattern || !a.strategy.patterns.has(sig.pattern))) return skip(rt, t, "pattern_not_in_strategy", false);
       if (!mapped) return skip(rt, t, "no_contract", true, `${exSymbol(sigIn.symbol)} на BingX не найден ни с каким числом нулей`);
@@ -219,7 +221,7 @@ export function createExecutor(deps: {
       };
       let order: Order | null = null;
       // Recheck after exchange preparation; a pause also stops work queued before the click.
-      if (!await deps.entryAllowed(a, sig.releasedAt).catch(() => false)) {
+      if (!await deps.entryAllowed(a, sig.releasedAt, sig.source).catch(() => false)) {
         return skip(rt, t, "account_paused", false);
       }
       await updateTrade(t.id, { client_order_id: cid, entry_sent_at: new Date(now()) });
@@ -417,10 +419,20 @@ export function createExecutor(deps: {
     const pos = await findPosition(rt, t, "normal");
     if (pos) return; // still open
     const since = (t.opened_at ?? t.entry_sent_at ?? t.received_at).getTime() - 1_000;
-    const hist = await rt.ex.history(t.symbol, since, "normal");
+    // Owner 2026-11-06 (a position closed by hand stayed "open"): when BingX keeps refusing the order
+    // history while the position is gone, the trade is booked closed after 3 minutes without the exit price,
+    // instead of hanging open forever and blocking the account.
+    const histFail: { error: string | null } = { error: null };
+    const hist = await rt.ex.history(t.symbol, since, "normal").catch((e) => {
+      if (now() - t.updated_at.getTime() < 180_000) throw e;
+      histFail.error = errText(e);
+      return [] as Order[];
+    });
+    const histError = histFail.error;
     const closing = hist.filter((o) => o.positionSide === posSide(t.side) && o.side === closeSide(t.side) && o.executedQty > 0 && o.avgPrice > 0)
       .sort((a, b) => a.updateTime - b.updateTime);
     if (!closing.length && now() - t.updated_at.getTime() < 60_000) return; // history can lag: next pass
+    if (histError) await event(rt.acct.id, t, "history_unavailable", { message: histError });
     const qty = closing.reduce((s, o) => s + o.executedQty, 0);
     const exit = qty > 0 ? closing.reduce((s, o) => s + o.avgPrice * o.executedQty, 0) / qty : null;
     const last = closing[closing.length - 1];
@@ -447,6 +459,7 @@ export function createExecutor(deps: {
       `Позиция закрыта. ${closeLine(reason, { source: cur.source, takePct: cur.take_pct })}.`,
       `Вход ${fmt(cur.entry_price)} → выход ${fmt(last?.avgPrice ?? exit)}${closing.length > 1 ? ` (средний выход по всем частям ${fmt(exit)})` : ""}`,
       resultLine(cur.pnl_pct, result, asset) + (cur.partial_done || closing.length > 1 ? " — с учётом частичных закрытий" : ""),
+      histError ? `Цену выхода BingX не отдал (${histError}) — результат не посчитан, сверьте на бирже.` : "",
     ].filter(Boolean).join("\n"));
   }
 
@@ -595,9 +608,12 @@ export function createExecutor(deps: {
     }
   }
 
-  async function reconcileAll(): Promise<void> {
+  /** Owner 2026-11-06: each account's result is returned, so Bot Health shows an account whose pass fails. */
+  async function reconcileAll(): Promise<Array<{ id: string; label: string; ok: boolean; error: string | null }>> {
     const rts = await refreshAccounts().catch(() => [...runtimes.values()]);
-    await Promise.allSettled(rts.map((rt) => reconcile(rt).catch((e) => log(`executor: reconcile ${rt.acct.id} failed`, e))));
+    return Promise.all(rts.map((rt) => reconcile(rt)
+      .then(() => ({ id: rt.acct.id, label: rt.acct.label, ok: true, error: null }))
+      .catch((e) => { log(`executor: reconcile ${rt.acct.id} failed`, e); return { id: rt.acct.id, label: rt.acct.label, ok: false, error: errText(e) }; })));
   }
 
   return { onSignal, onCommand, onSourceState, reconcileAll, refreshAccounts, runtimes };

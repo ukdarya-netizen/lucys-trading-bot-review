@@ -13,7 +13,6 @@ import { OwnerStrategyCard } from "@/components/owner-strategy-card";
 import { StrategyCard, StrategySection, NIHILIST_DESCRIPTIONS } from "@/components/StrategyCard";
 import { SizeInput, marginOf, num } from "@/components/form-bits";
 import { BotBrand, BOT_BRAND_NAMES, type BotSource } from "@/components/BotBrand";
-import { TradingControl } from "@/components/TradingControl";
 
 const LEVERAGE = 10;
 
@@ -33,28 +32,47 @@ function useToggle(onDone: () => void) {
 
 const sizeText = (mode: "percent" | "amount", value: number, asset: string) => (mode === "percent" ? `${value}% от баланса` : `${value} ${asset}`);
 
-/** «Мой кабинет», owner only: the main account — per bot: trading on/off, size, strategy, Bitcoin. */
+/** «Мой кабинет», owner only. Owner 2026-11-06: each bot has its OWN account (PAPER / VST / REAL), its own
+ * on/off and its own size — CAB can trade REAL while Nihilist stays on VST, or one bot can be off. One BingX key. */
 export function MainAccountToggles() {
   const ex = useExecutor();
+  const acc = useOwnerAccount();
   const [tab, setTab] = useState<Source>(() => { try { return localStorage.getItem("cabinet-tab") === "nihilist" ? "nihilist" : "cab"; } catch { return "cab"; } });
   const choose = (t: Source) => { setTab(t); try { localStorage.setItem("cabinet-tab", t); } catch { /* private mode */ } };
   const d = ex.data;
   // Never an empty page: while loading or on an error, say so (owner 2026-11-04).
   if (!d) return <LoadingOrError q={ex} />;
-  const account = d.accounts[0];
-  const refetch = () => void ex.refetch();
+  const refetch = () => { void ex.refetch(); void acc.refetch(); };
+  const bots = acc.data?.bots;
+  const mode = bots?.[tab].mode ?? "vst";
+  const account = accountOfMode(d, mode);
+  const asset = assetOf(mode);
   return (
     <div className="space-y-4" data-testid="main-account-toggles">
-      <section className="space-y-1 border border-primary/40 bg-card p-5">
-        <h2 className="text-base font-bold">Основной счёт{account ? ` · ${account.env === "real" ? "реальный" : "демо VST"}` : ""}</h2>
+      <section className="space-y-2 border border-primary/40 bg-card p-5">
+        <h2 className="text-base font-bold">Мои счета</h2>
         <p className="text-xs text-muted-foreground">
-          Все настройки счёта — здесь, отдельно для каждого бота. Сравнить результаты стратегий — на странице{" "}
-          <Link href="/journal/bots" onClick={() => { try { localStorage.setItem("strategies-tab", tab); } catch { /* private mode */ } }} className="text-primary underline">на странице результатов стратегий</Link>.
-          Изменения действуют для новых сделок; открытые бот доводит до закрытия по своей стратегии.
+          У каждого бота свой счёт, своё включение и свой размер сделки — настраиваются независимо во вкладке бота.
+          Сравнить результаты стратегий —{" "}
+          <Link href="/journal/bots" onClick={() => { try { localStorage.setItem("strategies-tab", tab); } catch { /* private mode */ } }} className="text-primary underline">на странице «Боты»</Link>.
         </p>
+        {bots && (
+          <div className="grid gap-2 sm:grid-cols-2">
+            {SOURCES.map((s) => (
+              <button key={s} type="button" onClick={() => choose(s)} className="flex items-center justify-between gap-2 border border-border bg-background p-3 text-left">
+                <BotBrand source={s} size="xs" />
+                <span className="text-right text-xs">
+                  <b>{MODE_TEXT[bots[s].mode]}</b>
+                  <span className={`block ${bots[s].enabled && !bots[s].blockedReason ? "text-success" : "text-destructive"}`}>
+                    {bots[s].enabled ? (bots[s].blockedReason ? "включено, но заблокировано" : "торгует") : "не торгует"}
+                  </span>
+                </span>
+              </button>
+            ))}
+          </div>
+        )}
       </section>
-      <OwnerAccountCard onSaved={refetch} />
-      <TradingControl target="owner" />
+      <OwnerKeyCard q={acc} onSaved={refetch} />
       <div role="tablist" className="flex gap-1 border-b border-border">
         {SOURCES.map((s) => (
           <button key={s} role="tab" type="button" aria-label={NAME[s]} aria-selected={tab === s} onClick={() => choose(s)}
@@ -63,96 +81,69 @@ export function MainAccountToggles() {
           </button>
         ))}
       </div>
-      <BotTrading key={`t-${tab}`} source={tab} d={d} onSaved={refetch} />
+      {acc.data ? <BotTrading key={`t-${tab}`} source={tab} d={d} info={acc.data} onSaved={refetch} />
+        : <p className={`text-sm ${acc.error ? "text-destructive" : "text-muted-foreground"}`}>{acc.error ? `Счета не загрузились: ${(acc.error as Error).message}` : "Загрузка счетов…"}</p>}
       {tab === "cab" ? <OwnerStrategyCard /> : <NihilistStrategyChoice d={d} onSaved={refetch} />}
-      <BtcCard key={`b-${tab}`} title={`Биткоин (BTC) · ${NAME[tab]}`}
+      <BtcCard key={`b-${tab}-${mode}`} title={`Биткоин (BTC) · ${NAME[tab]}`}
         saved={d.btc.settings.find((b) => b.source === tab) ?? defaultBtc(tab)} maxLeverage={d.btc.maxLeverage}
         savePath="/journal/executor/btc-settings" onSaved={refetch}
         otherMargin={marginOf(d[tab].settings.allocationMode, d[tab].settings.allocationValue, account?.balance?.equity ?? null)}
-        otherText={sizeText(d[tab].settings.allocationMode, d[tab].settings.allocationValue, account?.env === "real" ? "USDT" : "VST")}
-        equity={account?.balance?.equity ?? null} asset={account?.env === "real" ? "USDT" : "VST"}
+        otherText={sizeText(d[tab].settings.allocationMode, d[tab].settings.allocationValue, asset)}
+        equity={account?.balance?.equity ?? null} asset={asset}
         note={tab === "cab" ? `Ведение BTC — по правилам ${NAME.cab} при любой стратегии.` : `Ведение BTC — по выбранной стратегии ${NAME.nihilist}.`} />
     </div>
   );
 }
 
 type OwnerMode = "paper" | "vst" | "real";
+type OwnerBot = { mode: OwnerMode; enabled: boolean; blockedReason: string | null; openByMode: Partial<Record<OwnerMode, number>> };
 type OwnerAccount = {
   mode: OwnerMode; keyLast4: string | null; verifiedAt: string | null; error: string | null;
   secretsKey: boolean; secretsOff: boolean; keysStorable: boolean; openTrades: number;
+  bots: Record<Source, OwnerBot>;
 };
-const MODE_TEXT: Record<OwnerMode, string> = { paper: "PAPER", vst: "VST", real: "REAL" };
+const MODE_TEXT: Record<OwnerMode, string> = { paper: "PAPER", vst: "VST (демо)", real: "REAL" };
 const MODE_HINT: Record<OwnerMode, string> = {
-  paper: "Бумажная торговля: виртуальные 10 000, настоящие цены BingX, на биржу ничего не уходит. Ключ не нужен.",
-  vst: "Демо-счёт BingX (VST): настоящая биржа, виртуальные деньги.",
+  paper: "Бумажная торговля: виртуальные 10 000 USDT, настоящие цены BingX, на биржу ничего не уходит. Ключ не нужен.",
+  vst: "Демо-счёт BingX (VST): настоящая биржа, виртуальные деньги VST.",
   real: "Реальный счёт BingX: настоящие деньги (USDT).",
 };
+const assetOf = (m: OwnerMode) => (m === "real" ? "USDT" : m === "paper" ? "USDT (бумажные)" : "VST");
+const accountOfMode = (d: Status, m: OwnerMode) => d.accounts.find((a) => a.id === `owner-${m}`) ?? null;
+function useOwnerAccount() {
+  return useQuery({ queryKey: ["owner-account"], queryFn: () => api<OwnerAccount>("/journal/executor/owner-account"), refetchInterval: 15_000 });
+}
 
-/** Which account the bot trades — PAPER, VST or REAL — and the BingX API key for it (owner 2026-11-04). */
-function OwnerAccountCard({ onSaved }: { onSaved: () => void }) {
-  const q = useQuery({ queryKey: ["owner-account"], queryFn: () => api<OwnerAccount>("/journal/executor/owner-account") });
-  const [mode, setMode] = useState<OwnerMode | null>(null);
+/** One BingX key for the owner — it serves both VST and REAL (owner 2026-11-06). */
+function OwnerKeyCard({ q, onSaved }: { q: ReturnType<typeof useOwnerAccount>; onSaved: () => void }) {
   const [key, setKey] = useState("");
   const [secret, setSecret] = useState("");
-  const [confirmReal, setConfirmReal] = useState(false);
   const [msg, setMsg] = useState<{ text: string; bad: boolean } | null>(null);
   const save = useMutation({
-    mutationFn: () => api<OwnerAccount & { equity: number | null }>("/journal/executor/owner-account", {
-      method: "POST", body: { mode: mode ?? q.data?.mode, ...(key || secret ? { apiKey: key, apiSecret: secret } : {}), confirmReal },
-    }),
-    onSuccess: (r) => {
-      setKey(""); setSecret(""); setMode(null); setConfirmReal(false);
-      setMsg({ text: `Сохранено: ${MODE_TEXT[r.mode]}${r.equity !== null ? ` · баланс ${num(r.equity)}` : ""}. Бот подхватит в течение 20 с.`, bad: false });
-      void q.refetch(); onSaved();
-    },
+    mutationFn: () => api<OwnerAccount & { equity: number | null }>("/journal/executor/owner-account", { method: "POST", body: { apiKey: key, apiSecret: secret } }),
+    onSuccess: (r) => { setKey(""); setSecret(""); setMsg({ text: `Ключ сохранён${r.equity !== null ? ` · баланс ${num(r.equity)}` : ""}.`, bad: false }); onSaved(); },
     onError: (e) => setMsg({ text: e instanceof ApiFailure ? e.message : "Не удалось сохранить", bad: true }),
   });
-  if (!q.data) return <p className={`text-sm ${q.error ? "text-destructive" : "text-muted-foreground"}`}>{q.error ? `Счёт не загрузился: ${(q.error as Error).message}` : "Загрузка счёта…"}</p>;
   const d = q.data;
-  const m = mode ?? d.mode;
-  const needsKey = m !== "paper";
-  const keyNow = m === d.mode && d.keyLast4 ? `ключ ••••${d.keyLast4}${d.verifiedAt ? ", проверен" : ""}`
-    : m === "vst" && d.secretsKey && !d.keyLast4 ? (d.secretsOff ? "ключ из Secrets выключен (EXECUTOR_OWNER_VST=0) — вставьте ключ здесь" : "ключ из Secrets (BINGX_API_KEY)") : null;
-  const canSave = !save.isPending && (m !== d.mode || Boolean(key && secret)) && (m !== "real" || confirmReal);
+  if (!d) return null;
+  const now = d.keyLast4 ? `ключ ••••${d.keyLast4}${d.verifiedAt ? ", проверен" : ""}`
+    : d.secretsKey && !d.secretsOff ? "ключ из Secrets (BINGX_API_KEY) — только для VST; для REAL вставьте ключ здесь" : "ключа нет";
   return (
-    <section className="space-y-3 border border-border bg-card p-4" data-testid="owner-account">
-      <h2 className="font-bold">Счёт для торговли</h2>
-      {(() => {
-        const noAccount = d.mode !== "paper" && !d.keyLast4 && (d.mode === "real" || !d.secretsKey || d.secretsOff);
-        return noAccount
-          ? <p className="text-sm text-destructive">Сейчас счёта нет — бот принимает сигналы, но не торгует. Выберите PAPER или вставьте ключ BingX.</p>
-          : <p className="text-sm">Сейчас: <b>{MODE_TEXT[d.mode]}</b>{d.mode !== "paper" && d.keyLast4 ? ` · ключ ••••${d.keyLast4}` : d.mode === "vst" ? " · ключ из Secrets" : ""}</p>;
-      })()}
-      <div className="inline-grid grid-cols-3 border border-border">
-        {(["paper", "vst", "real"] as const).map((x) => (
-          <button key={x} type="button" aria-pressed={m === x} onClick={() => { setMode(x); setMsg(null); }}
-            className={`min-h-10 px-5 text-xs font-bold ${m === x ? "bg-primary text-primary-foreground" : "text-muted-foreground"}`}>{MODE_TEXT[x]}</button>
-        ))}
-      </div>
-      <p className="text-xs text-muted-foreground">{MODE_HINT[m]}</p>
-      {needsKey && (
-        <div className="space-y-2">
-          {keyNow && <p className="text-xs">Сейчас: {keyNow}. Чтобы заменить — вставьте новый.</p>}
-          <input type="text" autoComplete="off" spellCheck={false} placeholder="API Key BingX" value={key} onChange={(e) => { setKey(e.target.value.trim()); setMsg(null); }}
-            className="min-h-10 w-full border border-border bg-background px-3 text-sm" aria-label="API Key BingX" />
-          <input type="password" autoComplete="off" placeholder="Secret Key BingX" value={secret} onChange={(e) => { setSecret(e.target.value.trim()); setMsg(null); }}
-            className="min-h-10 w-full border border-border bg-background px-3 text-sm" aria-label="Secret Key BingX" />
-          <p className="text-xs text-muted-foreground">Права ключа: только «чтение» и «торговля фьючерсами». Ключ с выводом или переводом средств не примется. Хранится зашифрованным.</p>
-          {!d.keysStorable && <p className="text-xs text-destructive">В Secrets нет SUBSCRIBER_KEYS_SECRET — без него ключ не сохранить.</p>}
-        </div>
-      )}
-      {m === "real" && (
-        <label className="flex items-start gap-2 text-sm text-amber-200">
-          <input type="checkbox" checked={confirmReal} onChange={(e) => setConfirmReal(e.target.checked)} className="mt-1" />
-          <span>Понимаю: бот будет открывать сделки на реальные деньги.</span>
-        </label>
-      )}
-      {d.openTrades > 0 && m !== d.mode && <p className="text-xs text-amber-200">Открытых сделок на текущем счёте: {d.openTrades}. Сменить счёт можно после их закрытия.</p>}
+    <section className="space-y-2 border border-border bg-card p-4" data-testid="owner-key">
+      <h2 className="font-bold">Ключ BingX</h2>
+      <p className="text-sm">Сейчас: {now}.</p>
+      <p className="text-xs text-muted-foreground">Один ключ работает и для VST, и для REAL. PAPER ключа не требует.</p>
+      <input type="text" autoComplete="off" spellCheck={false} placeholder="API Key BingX" value={key} onChange={(e) => { setKey(e.target.value.trim()); setMsg(null); }}
+        className="min-h-10 w-full border border-border bg-background px-3 text-sm" aria-label="API Key BingX" />
+      <input type="password" autoComplete="off" placeholder="Secret Key BingX" value={secret} onChange={(e) => { setSecret(e.target.value.trim()); setMsg(null); }}
+        className="min-h-10 w-full border border-border bg-background px-3 text-sm" aria-label="Secret Key BingX" />
+      <p className="text-xs text-muted-foreground">Права ключа: только «чтение» и «торговля фьючерсами». Ключ с выводом или переводом средств не примется. Хранится зашифрованным.</p>
+      {!d.keysStorable && <p className="text-xs text-destructive">В Secrets нет SUBSCRIBER_KEYS_SECRET — без него ключ не сохранить.</p>}
       {d.error && !msg && <p className="text-xs text-destructive">Последняя ошибка: {d.error}</p>}
       <div className="flex flex-wrap items-center gap-3">
-        <button type="button" disabled={!canSave} onClick={() => save.mutate()}
+        <button type="button" disabled={save.isPending || !key || !secret} onClick={() => save.mutate()}
           className="min-h-10 border border-primary bg-primary px-5 text-xs font-bold uppercase text-primary-foreground disabled:opacity-40">
-          {save.isPending ? "Проверяю…" : key && secret ? "Проверить и сохранить" : "Сохранить"}
+          {save.isPending ? "Проверяю…" : "Проверить и сохранить"}
         </button>
         {msg && <span className={`text-sm ${msg.bad ? "text-destructive" : "text-success"}`}>{msg.text}</span>}
       </div>
@@ -160,23 +151,88 @@ function OwnerAccountCard({ onSaved }: { onSaved: () => void }) {
   );
 }
 
-/** One bot: its signals, open trades on/off (saves at once), trade size. */
-function BotTrading({ source, d, onSaved }: { source: Source; d: Status; onSaved: () => void }) {
-  const t = useToggle(onSaved);
-  const settings = d[source].settings;
+/** One bot's account: PAPER / VST / REAL (owner 2026-11-06). Open trades stay where they are and are led to the end. */
+function BotAccountChoice({ source, info, onSaved }: { source: Source; info: OwnerAccount; onSaved: () => void }) {
+  const bot = info.bots[source];
+  const [mode, setMode] = useState<OwnerMode>(bot.mode);
+  const [confirmReal, setConfirmReal] = useState(false);
+  const [msg, setMsg] = useState<{ text: string; bad: boolean } | null>(null);
+  useEffect(() => { setMode(bot.mode); }, [bot.mode]);
+  const save = useMutation({
+    mutationFn: () => api<OwnerAccount & { equity: number | null }>("/journal/executor/owner-account", { method: "POST", body: { source, mode, confirmReal } }),
+    onSuccess: (r) => { setConfirmReal(false); setMsg({ text: `${NAME[source]} теперь на ${MODE_TEXT[mode]}${r.equity !== null ? ` · баланс ${num(r.equity)}` : ""}. Действует для новых сигналов.`, bad: false }); onSaved(); },
+    onError: (e) => setMsg({ text: e instanceof ApiFailure ? e.message : "Не удалось сохранить", bad: true }),
+  });
+  const changed = mode !== bot.mode;
+  const elsewhere = (Object.entries(bot.openByMode) as Array<[OwnerMode, number]>).filter(([m, n]) => n > 0 && m !== mode);
   return (
-    <section className="space-y-3 border border-border bg-card p-4">
-      <p className="text-xs">Сигналы: <InboxLine name={NAME[source]} info={d.inbox?.[source]} /></p>
+    <div className="space-y-2">
+      <p className="text-xs uppercase text-muted-foreground">Счёт для сделок {NAME[source]}</p>
+      <div className="inline-grid grid-cols-3 border border-border">
+        {(["paper", "vst", "real"] as const).map((x) => (
+          <button key={x} type="button" aria-pressed={mode === x} onClick={() => { setMode(x); setMsg(null); }}
+            className={`min-h-10 px-4 text-xs font-bold ${mode === x ? "bg-primary text-primary-foreground" : "text-muted-foreground"}`}>{MODE_TEXT[x]}</button>
+        ))}
+      </div>
+      <p className="text-xs text-muted-foreground">{MODE_HINT[mode]}</p>
+      {elsewhere.map(([m, n]) => (
+        <p key={m} className="text-xs text-amber-200">На {MODE_TEXT[m]} открыто сделок {NAME[source]}: {n}. Они остаются там, бот ведёт их до закрытия; новые пойдут на {MODE_TEXT[mode]}.</p>
+      ))}
+      {changed && mode === "real" && (
+        <label className="flex items-start gap-2 text-sm text-amber-200">
+          <input type="checkbox" checked={confirmReal} onChange={(e) => setConfirmReal(e.target.checked)} className="mt-1" />
+          <span>Понимаю: бот будет открывать сделки {NAME[source]} на реальные деньги.</span>
+        </label>
+      )}
+      {(changed || msg) && (
+        <div className="flex flex-wrap items-center gap-3">
+          {changed && <button type="button" disabled={save.isPending || (mode === "real" && !confirmReal)} onClick={() => save.mutate()}
+            className="min-h-10 border border-primary bg-primary px-5 text-xs font-bold uppercase text-primary-foreground disabled:opacity-40">
+            {save.isPending ? "Проверяю счёт…" : `Перевести на ${MODE_TEXT[mode]}`}
+          </button>}
+          {msg && <span className={`text-sm ${msg.bad ? "text-destructive" : "text-success"}`}>{msg.text}</span>}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** One bot's new trades on/off — this bot only (owner 2026-11-06). */
+function BotSwitch({ source, info, onSaved }: { source: Source; info: OwnerAccount; onSaved: () => void }) {
+  const bot = info.bots[source];
+  const [msg, setMsg] = useState<{ text: string; bad: boolean } | null>(null);
+  const m = useMutation({
+    mutationFn: (enabled: boolean) => api<OwnerAccount>(`/journal/executor/owner-bot/${source}/trading`, { method: "POST", body: { enabled } }),
+    onSuccess: (_r, enabled) => { setMsg({ text: enabled ? "Включено. Новые сигналы будут открываться." : "Выключено. Открытые сделки бот ведёт до закрытия.", bad: false }); onSaved(); },
+    onError: (e) => setMsg({ text: e instanceof ApiFailure ? e.message : "Не удалось сохранить", bad: true }),
+  });
+  const live = bot.enabled && !bot.blockedReason;
+  return (
+    <div className="space-y-1">
       <label className="flex items-center justify-between gap-3 text-sm">
         <span>
-          Открывать сделки по сигналам {NAME[source]}
-          <span className={`block text-xs ${settings.enabled ? "text-success" : "text-destructive"}`}>{settings.enabled ? "включено" : "выключено"}</span>
+          <b>Открывать новые сделки {NAME[source]}</b> · {MODE_TEXT[bot.mode]}
+          <span className={`block text-xs ${live ? "text-success" : "text-destructive"}`}>{!bot.enabled ? "выключено" : bot.blockedReason ? "включено, но заблокировано" : "включено"}</span>
         </span>
-        <Switch checked={settings.enabled} disabled={t.pending} aria-label={`Открывать сделки по сигналам ${NAME[source]}`}
-          onCheckedChange={(v) => t.save({ path: `/journal/executor/source-settings/${source}`, body: { ...settings, enabled: v } })} />
+        <Switch checked={bot.enabled} disabled={m.isPending || (!bot.enabled && Boolean(bot.blockedReason))} aria-label={`Открывать новые сделки ${NAME[source]}`}
+          onCheckedChange={(v) => m.mutate(v)} />
       </label>
-      {t.msg && <p className={`text-sm ${t.msg.bad ? "text-destructive" : "text-success"}`}>{t.msg.text}</p>}
-      <SizeEditor source={source} d={d} onSaved={onSaved} />
+      <p className="text-xs text-muted-foreground">Только этот бот: второй не затрагивается. Выключение не закрывает открытые сделки — бот ведёт их до закрытия.</p>
+      {bot.blockedReason && <p className="text-xs text-amber-300">{bot.blockedReason}</p>}
+      {msg && <p className={`text-xs ${msg.bad ? "text-destructive" : "text-success"}`}>{msg.text}</p>}
+    </div>
+  );
+}
+
+/** One bot: its signals, its account, its on/off, its trade size (owner 2026-11-06: all independent of the other bot). */
+function BotTrading({ source, d, info, onSaved }: { source: Source; d: Status; info: OwnerAccount; onSaved: () => void }) {
+  const mode = info.bots[source].mode;
+  return (
+    <section className="space-y-4 border border-border bg-card p-4">
+      <p className="text-xs">Сигналы: <InboxLine name={NAME[source]} info={d.inbox?.[source]} /></p>
+      <BotAccountChoice source={source} info={info} onSaved={onSaved} />
+      <div className="border-t border-border pt-3"><BotSwitch source={source} info={info} onSaved={onSaved} /></div>
+      <SizeEditor source={source} d={d} mode={mode} onSaved={onSaved} />
     </section>
   );
 }
@@ -206,14 +262,14 @@ function NihilistStrategyChoice({ d, onSaved }: { d: Status; onSaved: () => void
 }
 
 /** Trade size of the main account for one bot (not BTC): % of the balance or an amount, 10x isolated. */
-function SizeEditor({ source, d, onSaved }: { source: Source; d: Status; onSaved: () => void }) {
+function SizeEditor({ source, d, mode: accountMode, onSaved }: { source: Source; d: Status; mode: OwnerMode; onSaved: () => void }) {
   const saved = d[source].settings;
   const [mode, setMode] = useState(saved.allocationMode);
   const [value, setValue] = useState(saved.allocationValue);
   const [msg, setMsg] = useState<{ text: string; bad: boolean } | null>(null);
   useEffect(() => { setMode(saved.allocationMode); setValue(saved.allocationValue); }, [saved.allocationMode, saved.allocationValue]);
-  const equity = d.accounts[0]?.balance?.equity ?? null;
-  const asset = d.accounts[0]?.env === "real" ? "USDT" : "VST";
+  const equity = accountOfMode(d, accountMode)?.balance?.equity ?? null;
+  const asset = assetOf(accountMode);
   const margin = marginOf(mode, value, equity);
   const dirty = mode !== saved.allocationMode || value !== saved.allocationValue;
   const save = useMutation({

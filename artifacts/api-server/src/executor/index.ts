@@ -27,7 +27,7 @@ let executor: Executor | null = null;
 let syncState: Record<string, { at: number | null; ok: boolean | null; error: string | null }> = {};
 // Bot Health (owner 2026-11-03): when the executor started and how the last reconcile pass went.
 let startedAt: number | null = null;
-const lastReconcile: { at: number | null; ms: number | null; ok: boolean | null; error: string | null } = { at: null, ms: null, ok: null, error: null };
+const lastReconcile: { at: number | null; ms: number | null; ok: boolean | null; error: string | null; accounts: Array<{ id: string; label: string; ok: boolean; error: string | null }> } = { at: null, ms: null, ok: null, error: null, accounts: [] };
 let handler: ((req: IncomingMessage, res: ServerResponse) => Promise<void>) | null = null;
 
 export function executorRequestHandler(req: IncomingMessage, res: ServerResponse): void {
@@ -122,8 +122,8 @@ export async function startExecutor(log: (msg: string, extra?: unknown) => void)
     reconciling = true;
     const t0 = Date.now();
     try {
-      await ex.reconcileAll();
-      Object.assign(lastReconcile, { at: Date.now(), ms: Date.now() - t0, ok: true, error: null });
+      const accounts = await ex.reconcileAll();
+      Object.assign(lastReconcile, { at: Date.now(), ms: Date.now() - t0, ok: true, error: null, accounts });
     } catch (e) {
       Object.assign(lastReconcile, { at: Date.now(), ms: Date.now() - t0, ok: false, error: e instanceof Error ? e.message.slice(0, 200) : String(e) });
       log("executor: reconcile pass failed", e);
@@ -237,6 +237,7 @@ export async function executorStatus(): Promise<unknown> {
     btc: { settings: await getBtcSettings("owner"), maxLeverage: BTC_MAX_LEVERAGE },
     accounts: executor ? [...executor.runtimes.values()].map((r) => ({
       id: r.acct.id, label: r.acct.label, env: r.acct.env, strategy: r.acct.strategy.name, takePct: r.acct.strategy.takePct,
+      paper: Boolean(r.acct.paper), sources: [...r.acct.sources],
       balance: lv.balances.get(r.acct.id) ?? null,
     })) : [],
     sync: Object.fromEntries(Object.entries(syncState).map(([k, v]) => [k, { at: v.at ? new Date(v.at).toISOString() : null, ok: v.ok, error: v.error }])),
@@ -338,6 +339,11 @@ export async function executorHealth(): Promise<unknown> {
   const view = (r: any) => ({ id: r.id, accountId: r.account_id, source: SOURCE_NAME[r.source] ?? r.source, symbol: r.symbol, side: r.side, status: STATUS_TEXT[r.status] ?? r.status ?? "открыта", since: iso(r.received_at ?? r.opened_at) });
   if (stuckQ.rowCount) problems.push({ level: "red", text: `Сделки застряли при открытии или закрытии: ${stuckQ.rowCount}` });
   if (unannQ.rowCount) problems.push({ level: "yellow", text: `Открытые сделки без сообщения «Открыт…»: ${unannQ.rowCount} — сверка доведёт их` });
+
+  // Owner 2026-11-06: an account whose reconcile pass fails (closes by hand, stops, takes are then not seen).
+  if (enabled && executor) for (const a of lastReconcile.accounts) {
+    if (!a.ok) problems.push({ level: "red", text: `${a.label}: сверка с биржей не проходит — ${a.error}. Закрытия (в том числе руками) не видны боту.` });
+  }
 
   // Sources: signals (last 24 h) and the position sync (only matters while a trade of the source is open).
   const inbox = await inboxBySource();
