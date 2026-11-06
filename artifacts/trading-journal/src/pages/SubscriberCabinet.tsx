@@ -387,8 +387,10 @@ function Results() {
  * renders it inside the owner's journal ("Мой кабинет") without the
  * subscriber page shell; the owner is approved automatically by the API.
  */
-export function SubscriberCabinetBody({ embedded = false }: { embedded?: boolean }) {
-  const Wrap = embedded ? EmbeddedShell : Shell;
+export function SubscriberCabinetBody({ embedded = false, inApp = false }: { embedded?: boolean; inApp?: boolean }) {
+  // inApp (owner 2026-11-06): an approved subscriber's "Кабинет" tab inside the subscriber app —
+  // no page shell, no owner note, results live on Обзор/История instead.
+  const Wrap = embedded || inApp ? EmbeddedShell : Shell;
   const queryClient = useQueryClient();
   const query = useQuery({
     queryKey: ["me-subscription"],
@@ -413,7 +415,7 @@ export function SubscriberCabinetBody({ embedded = false }: { embedded?: boolean
   }
   return (
     <Wrap>
-      {embedded ? (
+      {inApp ? null : embedded ? (
         <p className="border border-primary/30 bg-primary/5 p-4 text-sm">
           Ниже — кабинет так, как его видят подписчики: отдельный счёт со своим ключом BingX, не основной.
         </p>
@@ -431,7 +433,7 @@ export function SubscriberCabinetBody({ embedded = false }: { embedded?: boolean
       <StrategyStep sub={sub} choices={strategyChoices} onChanged={refresh} />
       <SizeStep key={`${sub.tradingAccount}:${JSON.stringify(sub.positionSettings)}`} sub={sub} choices={positionChoices} onChanged={refresh} />
       <TradingStep sub={sub} onChanged={refresh} />
-      <Results />
+      {!inApp && <Results />}
       <p className="flex items-center gap-2 text-xs text-muted-foreground"><KeyRound className="h-3.5 w-3.5" />Ключ хранится зашифрованным и никому не показывается, включая владельца.</p>
     </Wrap>
   );

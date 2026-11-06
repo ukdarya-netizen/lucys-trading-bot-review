@@ -4,7 +4,7 @@ import { HeartPulse, LogOut, LayoutDashboard, List, History, ShieldAlert, Termin
 import { useState } from "react";
 import { BrandLockup, BrandMark } from "@/components/brand";
 import JournalSubscribers from "./JournalSubscribers";
-import SubscriberCabinet from "./SubscriberCabinet";
+import SubscriberApp from "./subscriber/SubscriberApp";
 import { useGetJournalAccess, getGetJournalAccessQueryKey } from "@workspace/api-client-react";
 import TradeOverview from "./TradeOverview";
 import TradePositions from "./TradePositions";
@@ -88,10 +88,10 @@ export default function JournalLayout() {
     );
   }
 
-  // Everyone who is not the owner gets the subscriber cabinet (request,
-  // approval wait, key, strategy, start/stop).
+  // Everyone who is not the owner gets the subscriber app (owner 2026-11-06): the cabinet page while
+  // not approved; once approved — Обзор, Позиции, История, Кабинет about their own account only.
   if (!access.authorized) {
-    return <SubscriberCabinet />;
+    return <SubscriberApp />;
   }
 
   const current = ALL_ITEMS.find((item) => item.href === location) ??

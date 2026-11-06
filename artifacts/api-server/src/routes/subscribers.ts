@@ -5,6 +5,7 @@ import { SetSubscriberSourcesBody, SetSubscriberSourcesParams, SetSubscriberSour
 import { announceRequest, botUsername, decide, send as sendTelegram, TEXT as SUB_TEXT, type Decision } from "../lib/subscriber-bot";
 import { BTC_MAX_LEVERAGE, getBtcSettings, getSourceSettings, saveBtcSettings } from "../executor/store";
 import { closeReasonText } from "../executor/texts";
+import { subscriberTrades } from "../lib/subscriber-trades";
 import { nihilistStrategy } from "../executor/plan";
 
 type SrcStat = { closed: number; pnl: number };
@@ -263,6 +264,20 @@ router.get("/me/results", async (req, res) => {
     })) });
   } catch {
     res.json({ trades: [] });
+  }
+});
+
+// Owner 2026-11-06: the subscriber's own positions and history for the subscriber pages (own accounts only).
+router.get("/me/trades", async (req, res) => {
+  res.setHeader("Cache-Control", "no-store");
+  const row = await subscriberFor(req);
+  if (row.status !== "approved") return refuse(res, 403, "not_approved", "Заявка ещё не одобрена");
+  const scope = req.query.scope === "open" || req.query.scope === "closed" ? req.query.scope : "all";
+  const days = Number(req.query.days ?? 90);
+  try {
+    res.json(await subscriberTrades(row.id, { scope, days: Number.isFinite(days) ? days : 90 }));
+  } catch {
+    res.status(503).json({ error: { code: "trades_unavailable", message: "Не удалось загрузить сделки" } });
   }
 });
 
