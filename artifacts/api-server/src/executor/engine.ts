@@ -255,7 +255,13 @@ export function createExecutor(deps: {
         // An order may exist: let the reconciler decide from the exchange.
         await updateTrade(t.id, { status: "unknown", reason: "entry_error" });
         await event(a.id, t, "entry_error", { message: errText(e) });
-        await say(`${head(rt, cur)}\nОрдер на вход отправлен, но настройка позиции прервалась: ${errText(e)}\nБот сверит позицию с биржей и закончит защиту в течение минуты.`);
+        if (e instanceof BingXError && e.kind === "rate") {
+          const until = Number(/unblocked after (\d{13})/.exec(e.message)?.[1]);
+          const when = Number.isFinite(until) ? ` до ${new Date(until).toISOString().slice(11, 19)} UTC` : "";
+          await say(`${head(rt, cur)}\nВход отправлен вместе со стопом. BingX временно ограничил частоту запросов${when}: проверка стопа, маржи и тейка отложена.\nБот закончит её сам, как только ограничение снимется (сверка каждые 20 с).`);
+        } else {
+          await say(`${head(rt, cur)}\nОрдер на вход отправлен, но настройка позиции прервалась: ${errText(e)}\nБот сверит позицию с биржей и закончит защиту в течение минуты.`);
+        }
       } else if (cur) {
         await fail(rt, cur, "error", e instanceof Error ? e.message.slice(0, 160) : "");
       }

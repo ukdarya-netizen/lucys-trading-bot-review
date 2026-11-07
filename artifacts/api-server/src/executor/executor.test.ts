@@ -454,6 +454,25 @@ test("a reconcile pass asks BingX for open orders once for all symbols (not once
   assert.equal(asked[0]!.params.symbol, undefined);
 });
 
+test("a burst of signals asks BingX for open orders once (one shared request), and accounts on one key share the rate block", async () => {
+  const a = createBingX({ env: "vst", key: "burst-key", secret: "s", host });
+  const b = createBingX({ env: "real", key: "burst-key", secret: "s", host });
+  // Five symbols asked at the same moment → one request for the whole account.
+  const before = fake.calls.length;
+  await Promise.all(["BIRBUSDT", "IDOLUSDT", "ZZZUSDT", "YYYUSDT", "AAAUSDT"].map((sym) => a.openOrders(sym, "protect")));
+  const asked = fake.calls.slice(before).filter((c) => c.path === "/openApi/swap/v2/trade/openOrders");
+  assert.equal(asked.length, 1, JSON.stringify(asked));
+  // BingX blocks positions for ~300 ms after refusing account A: account B (same key) waits for the
+  // unblock instead of firing into the block.
+  fake.rateLimit("/openApi/swap/v2/user/positions", 1);
+  const t0 = Date.now();
+  const pa = a.positions(undefined, "protect");
+  await new Promise((r) => setTimeout(r, 60));
+  const tb = b.positions(undefined, "protect").then(() => Date.now() - t0);
+  await pa;
+  assert.ok((await tb) >= 250, `B waited for the shared block (${await tb} ms)`);
+});
+
 test("another number of zeros on BingX: CAB's 1000000MOG trades as BingX's MOG with the stop rescaled; later stop moves are rescaled too; a coin BingX does not list is skipped with the reason", async () => {
   fake.setPrice("MOG-USDT", 0.0000005); // source quotes 1 000 000 MOG at 0.5
   await ex.onSignal(sig(191, "1000000MOGUSDT", 0.45, Date.now(), 0.5));
