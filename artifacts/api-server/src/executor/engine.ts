@@ -266,32 +266,16 @@ export function createExecutor(deps: {
   async function protect(rt: Runtime, t: Trade, announce: boolean): Promise<void> {
     const pos = await findPosition(rt, t);
     if (!pos) { await updateTrade(t.id, { status: "closing" }); return; } // closed already (stop in the first seconds): reconcile books it
-    const c = await rt.ex.contract(t.symbol, "protect");
     let cur = await updateTrade(t.id, {
       status: "open", qty: pos.qty, initial_qty: t.initial_qty ?? pos.qty, entry_price: pos.avgPrice,
       opened_at: t.opened_at ?? new Date(now()), liquidation_price: pos.liquidationPrice, margin: pos.margin,
     });
     await ensureStop(rt, cur, pos);
-    // Liquidation beyond the stop: add isolated margin (no cap, owner rule) or close.
-    let added = 0;
-    let p = pos;
-    for (let i = 0; i < 3; i++) {
-      const amount = topUpAmount({
-        side: t.side, qty: p.qty, stop: cur.stop_price!, liquidation: p.liquidationPrice, entry: p.avgPrice,
-        minIncrease: p.minIncreaseMargin, pricePrecision: c.pricePrecision,
-      });
-      if (Number(amount) <= 0) break;
-      const bal = await rt.ex.balance("protect");
-      if (Number(amount) > bal.available) { await closeMarket(rt, cur, "no_margin_for_stop"); return; }
-      await rt.ex.addMargin(t.symbol, posSide(t.side), amount, "protect");
-      added += Number(amount);
-      await event(rt.acct.id, cur, "margin_added", { amount, liquidationBefore: p.liquidationPrice });
-      const again = await findPosition(rt, cur);
-      if (!again) break;
-      p = again;
-    }
-    if (!liquidationSafe(t.side, p.liquidationPrice, cur.stop_price!, p.avgPrice)) { await closeMarket(rt, cur, "liquidation_before_stop"); return; }
-    cur = await updateTrade(t.id, { margin_added: (t.margin_added ?? 0) + added, liquidation_price: p.liquidationPrice, margin: p.margin });
+    const kept = await keepLiquidationBeyondStop(rt, cur, pos);
+    if (!kept) return;
+    const added = kept.added;
+    const p = kept.pos;
+    cur = kept.trade;
     let takeError = "";
     if (cur.take_pct) {
       try { await ensureTake(rt, cur, p); } catch (e) {
@@ -322,6 +306,39 @@ export function createExecutor(deps: {
         late !== null ? `Ордер отправлен через ${late.toFixed(1)} с после получения сигнала` : "",
       ].filter(Boolean).join("\n"));
     }
+  }
+
+  /**
+   * Liquidation must stay beyond the stop for the whole life of the position, not only at the open:
+   * funding fees and fees are taken from the isolated margin and pull the liquidation price towards
+   * the stop (BingX "SL Failure Warning", owner 2026-11-07, GTCUSDT). Add isolated margin (no cap,
+   * owner rule) or close. Returns null when the position was closed.
+   */
+  async function keepLiquidationBeyondStop(rt: Runtime, t: Trade, pos: Position): Promise<{ trade: Trade; pos: Position; added: number } | null> {
+    if (!t.stop_price) return { trade: t, pos, added: 0 };
+    const c = await rt.ex.contract(t.symbol, "protect");
+    let added = 0;
+    let p = pos;
+    for (let i = 0; i < 3; i++) {
+      const amount = topUpAmount({
+        side: t.side, qty: p.qty, stop: t.stop_price, liquidation: p.liquidationPrice, entry: p.avgPrice,
+        minIncrease: p.minIncreaseMargin, pricePrecision: c.pricePrecision,
+      });
+      if (Number(amount) <= 0) break;
+      const bal = await rt.ex.balance("protect");
+      if (Number(amount) > bal.available) { await closeMarket(rt, t, "no_margin_for_stop"); return null; }
+      await rt.ex.addMargin(t.symbol, posSide(t.side), amount, "protect");
+      added += Number(amount);
+      await event(rt.acct.id, t, "margin_added", { amount, liquidationBefore: p.liquidationPrice });
+      const again = await findPosition(rt, t);
+      if (!again) break;
+      p = again;
+    }
+    if (!liquidationSafe(t.side, p.liquidationPrice, t.stop_price, p.avgPrice)) { await closeMarket(rt, t, "liquidation_before_stop"); return null; }
+    const trade = added > 0 || p.liquidationPrice !== t.liquidation_price
+      ? await updateTrade(t.id, { margin_added: (t.margin_added ?? 0) + added, liquidation_price: p.liquidationPrice, margin: p.margin })
+      : t;
+    return { trade, pos: p, added };
   }
 
   async function protectiveOrders(rt: Runtime, t: Trade): Promise<{ stops: Order[]; takes: Order[] }> {
@@ -555,6 +572,11 @@ export function createExecutor(deps: {
       if (!(await hasEvent(cur.id, "opened"))) { await protect(rt, cur, true); return; }
       if (Math.abs(pos.qty - (cur.qty ?? 0)) > 1e-12) await updateTrade(cur.id, { qty: pos.qty });
       await ensureStop(rt, cur, pos);
+      const kept = await keepLiquidationBeyondStop(rt, (await tradeById(cur.id))!, pos);
+      if (!kept) return;
+      if (kept.added > 0) {
+        await say(`${head(rt, kept.trade)}\nЛиквидация подошла к стопу (комиссии и фандинг съели маржу): долито ${kept.added.toFixed(2)} USDT\nСтоп ${fmt(kept.trade.stop_price)} · ликвидация теперь ${fmt(kept.pos.liquidationPrice)}`);
+      }
       if (cur.take_pct) await ensureTake(rt, cur, pos);
       if (ownMgmt(cur)) await manage(rt, (await tradeById(cur.id))!);
     }).catch(async (e) => {

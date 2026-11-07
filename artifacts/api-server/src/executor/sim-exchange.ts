@@ -214,6 +214,8 @@ export function createSimExchange(opts: { equity?: number; prices?: Record<strin
     setMaxPositionValue: (symbol: string, v: number) => { maxVal.set(symbol, v); },
     isHedge: () => dual,
     liq: (symbol: string, side: "LONG" | "SHORT") => { const p = pos(symbol, side); return p ? liq(p) : null; },
+    /** Funding / fees taken from the isolated margin (test helper). */
+    drainMargin: (symbol: string, side: "LONG" | "SHORT", amount: number) => { const p = pos(symbol, side); if (p) p.margin -= amount; },
     equity: () => equity,
   };
 }

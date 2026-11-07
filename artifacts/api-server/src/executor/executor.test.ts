@@ -177,6 +177,34 @@ test("restart in the middle of an entry: the reconciler adopts the exchange posi
   assert.equal((await trade(7)).status, "closed");
 });
 
+test("liquidation drifts to the stop while open (funding ate the margin): the reconciler adds margin and says so", async () => {
+  fake.setPrice("BIRB-USDT", 100);
+  await ex.onSignal(sig(41, "BIRBUSDT", 91));
+  const t0 = await trade(41);
+  assert.equal(t0.status, "open", JSON.stringify(t0));
+  const before = Number(t0.margin_added);
+  // Funding takes 6 USDT of the isolated margin: liquidation moves up past the 91 stop.
+  fake.drainMargin("BIRB-USDT", "LONG", 6);
+  assert.ok(fake.liq("BIRB-USDT", "LONG")! > 91 - 0.5, `liquidation ${fake.liq("BIRB-USDT", "LONG")} near/above the stop`);
+  sent.length = 0;
+  await ex.reconcileAll();
+  const t1 = await trade(41);
+  assert.equal(t1.status, "open");
+  assert.ok(Number(t1.margin_added) > before, "margin added while open");
+  assert.ok(fake.liq("BIRB-USDT", "LONG")! < 91, `liquidation ${fake.liq("BIRB-USDT", "LONG")} back beyond the stop`);
+  assert.match(sent.join("\n"), /Ликвидация подошла к стопу/);
+  // Nothing more to add on the next pass.
+  sent.length = 0;
+  await ex.reconcileAll();
+  assert.equal(Number((await trade(41)).margin_added), Number(t1.margin_added));
+  assert.doesNotMatch(sent.join("\n"), /Ликвидация подошла к стопу/);
+  // Leave the fake exchange flat for the next tests: the +5% take fills.
+  fake.setPrice("BIRB-USDT", 106);
+  await ex.reconcileAll();
+  assert.equal((await trade(41)).status, "closed");
+  fake.setPrice("BIRB-USDT", 100);
+});
+
 test("top-up math: liquidation of a 10x long at −9.5% vs a 9% stop needs margin; a 5% stop needs none", () => {
   assert.equal(topUpAmount({ side: "long", qty: 10, stop: 95, liquidation: 90.5, entry: 100, minIncrease: 0.01, pricePrecision: 4 }), "0.00");
   assert.ok(Number(topUpAmount({ side: "long", qty: 10, stop: 91, liquidation: 90.8, entry: 100, minIncrease: 0.01, pricePrecision: 4 })) > 0);
