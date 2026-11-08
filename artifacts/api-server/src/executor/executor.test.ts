@@ -157,33 +157,55 @@ test("refusals: stale, price already beyond the stop, one position per symbol; f
   strategy = resolveStrategy({ strategy: "take5" });
 });
 
-test("source cancellation and position review observe exchange state without closing the trade", async () => {
+test("source cancellation closes the confirmed side and preserves opposite-side protection", async () => {
   fake.setPrice("BIRB-USDT", 100);
   await ex.onSignal(sig(63, "BIRBUSDT", 91));
-  const opened = await trade(63);
-  assert.equal(opened.status, "open");
+  const short = parseSignal({ sourceSignalId: "cab-signal-64", patternId: "liquidation_cascade", confirmationStatus: "confirmed",
+    signalAt: new Date().toISOString(), symbol: "BIRBUSDT", side: "sell", orderType: "market", quantity: "1", referencePrice: "100", stopLoss: "109" }, "cab", Date.now());
+  assert.ok(short.ok, JSON.stringify(short));
+  await ex.onSignal(short.value);
+  assert.equal((await trade(64)).status, "open");
   const marketOrdersBefore = fake.calls.filter((call) => call.path === "/openApi/swap/v2/trade/order" && call.params.type === "MARKET").length;
 
   const cancel = parseCommand({ commandId: "c63-cancel", sourceSignalId: "cab-signal-63", symbol: "BIRBUSDT", type: "cancel_entry", eventSeq: 1,
     eventAt: new Date().toISOString(), reason: "source_cancelled" }, Date.now());
   assert.ok(cancel.ok);
   await ex.onCommand(cancel.value);
-  assert.equal((await trade(63)).status, "open");
+  assert.equal((await trade(63)).status, "closed");
+  assert.equal((await trade(64)).status, "open", "the opposite position remains open");
+  assert.equal(fake.calls.filter((call) => call.path === "/openApi/swap/v2/trade/order" && call.params.type === "MARKET").length, marketOrdersBefore + 1);
+  assert.equal(fake.orders.filter((order) => order.symbol === "BIRB-USDT" && order.positionSide === "SHORT" && order.type === "STOP_MARKET" && order.status === "NEW").length, 1,
+    "the opposite side's stop must remain in place");
+  const review = await pool.query("SELECT detail FROM ex_events WHERE trade_id = $1 AND kind = 'source_position_review'", [(await trade(63)).id]);
+  assert.equal(review.rowCount, 1);
+  assert.equal(review.rows[0]!.detail.exchangeState, "open");
+  assert.equal(review.rows[0]!.detail.closeRequested, true);
+});
 
-  const review = parseCommand({ commandId: "c63-review", sourceSignalId: "cab-signal-63", symbol: "BIRBUSDT", type: "position_review", eventSeq: 2,
-    eventAt: new Date().toISOString(), reason: "source_cancelled", action: "review", trackerStatus: "cancelled",
-    exchangeReconciliationRequired: true, closePosition: false }, Date.now());
-  assert.ok(review.ok);
-  await ex.onCommand(review.value);
-  assert.equal((await trade(63)).status, "open");
-  assert.equal(fake.calls.filter((call) => call.path === "/openApi/swap/v2/trade/order" && call.params.type === "MARKET").length, marketOrdersBefore,
-    "cancel/review events must not submit a market close");
+test("cancelled position_review closes; reclassified position_review only observes", async () => {
+  fake.setPrice("ZZZ-USDT", 100);
+  await ex.onSignal(sig(65, "ZZZUSDT", 91));
+  const reviewCancelled = parseCommand({ commandId: "c65-review", sourceSignalId: "cab-signal-65", symbol: "ZZZUSDT", type: "position_review", eventSeq: 1,
+    eventAt: new Date().toISOString(), reason: "source_cancelled", action: "review", sourceStatus: "cancelled", closePosition: false }, Date.now());
+  assert.ok(reviewCancelled.ok);
+  assert.equal(reviewCancelled.value.trackerStatus, "cancelled");
+  await ex.onCommand(reviewCancelled.value);
+  assert.equal((await trade(65)).status, "closed");
+  const marketAfterCancel = fake.calls.filter((call) => call.path === "/openApi/swap/v2/trade/order" && call.params.type === "MARKET").length;
 
-  const events = await pool.query("SELECT kind, detail FROM ex_events WHERE trade_id = $1 AND kind = 'source_position_review' ORDER BY id", [opened.id]);
-  assert.equal(events.rowCount, 2);
-  assert.ok(events.rows.every((row) => row.detail.exchangeState === "open" && row.detail.closePosition === false));
-  assert.equal(events.rows[1]!.detail.sourceAction, "review");
-  assert.equal(events.rows[1]!.detail.trackerStatus, "cancelled");
+  fake.setPrice("YYY-USDT", 100);
+  await ex.onSignal(sig(66, "YYYUSDT", 91));
+  const openedReview = await trade(66);
+  const reclassified = parseCommand({ commandId: "c66-review", sourceSignalId: "cab-signal-66", symbol: "YYYUSDT", type: "position_review", eventSeq: 1,
+    eventAt: new Date().toISOString(), reason: "reclassified", action: "review", trackerStatus: "reclassified" }, Date.now());
+  assert.ok(reclassified.ok);
+  await ex.onCommand(reclassified.value);
+  assert.equal((await trade(66)).status, "open");
+  assert.equal(fake.calls.filter((call) => call.path === "/openApi/swap/v2/trade/order" && call.params.type === "MARKET").length, marketAfterCancel,
+    "reclassification alone must not close a position");
+  const events = await pool.query("SELECT detail FROM ex_events WHERE trade_id = $1 AND kind = 'source_position_review'", [openedReview.id]);
+  assert.equal(events.rowCount, 1);
+  assert.equal(events.rows[0]!.detail.closeRequested, false);
 });
 test("restart in the middle of an entry: the reconciler adopts the exchange position and protects it", async () => {
   fake.setPrice("BIRB-USDT", 100);
