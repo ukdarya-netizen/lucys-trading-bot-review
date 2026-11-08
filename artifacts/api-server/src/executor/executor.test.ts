@@ -157,6 +157,32 @@ test("refusals: stale, price already beyond the stop, one position per symbol; f
   strategy = resolveStrategy({ strategy: "take5" });
 });
 
+test("source cancellation and position review observe exchange state without closing the trade", async () => {
+  fake.setPrice("BIRB-USDT", 100);
+  await ex.onSignal(sig(63, "BIRBUSDT", 91));
+  const opened = await trade(63);
+  assert.equal(opened.status, "open");
+  const marketOrdersBefore = fake.calls.filter((call) => call.path === "/openApi/swap/v2/trade/order" && call.params.type === "MARKET").length;
+
+  const cancel = parseCommand({ commandId: "c63-cancel", sourceSignalId: "cab-signal-63", symbol: "BIRBUSDT", type: "cancel_entry", eventSeq: 1,
+    eventAt: new Date().toISOString(), reason: "source_cancelled" }, Date.now());
+  assert.ok(cancel.ok);
+  await ex.onCommand(cancel.value);
+  assert.equal((await trade(63)).status, "open");
+
+  const review = parseCommand({ commandId: "c63-review", sourceSignalId: "cab-signal-63", symbol: "BIRBUSDT", type: "position_review", eventSeq: 2,
+    eventAt: new Date().toISOString(), reason: "source_cancelled", action: "review", trackerStatus: "cancelled",
+    exchangeReconciliationRequired: true, closePosition: false }, Date.now());
+  assert.ok(review.ok);
+  await ex.onCommand(review.value);
+  assert.equal((await trade(63)).status, "open");
+  assert.equal(fake.calls.filter((call) => call.path === "/openApi/swap/v2/trade/order" && call.params.type === "MARKET").length, marketOrdersBefore,
+    "cancel/review events must not submit a market close");
+
+  const events = await pool.query("SELECT kind, detail FROM ex_events WHERE trade_id = $1 AND kind = 'source_position_review' ORDER BY id", [opened.id]);
+  assert.equal(events.rowCount, 2);
+  assert.ok(events.rows.every((row) => row.detail.exchangeState === "open" && row.detail.closePosition === false));
+});
 test("restart in the middle of an entry: the reconciler adopts the exchange position and protects it", async () => {
   fake.setPrice("BIRB-USDT", 100);
   // An order that reached the exchange, but the process died before booking it.
