@@ -506,7 +506,7 @@ export function createExecutor(deps: {
     if (cancellation) {
       const reason = "source:" + (cmd.reason || "cancelled");
       const originalStatus = t.status;
-      const alreadyQueued = t.status === "closing" && t.pending_close_reason === reason;
+      const alreadyQueued = t.status === "closing" && t.pending_close_reason?.startsWith("source:") === true;
       const retryAsClosing = ["open", "closing", "skipped", "failed"].includes(t.status);
       const pending = alreadyQueued ? t : await updateTrade(t.id, {
         ...(retryAsClosing ? { status: "closing" } : {}),
