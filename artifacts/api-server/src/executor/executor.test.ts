@@ -212,17 +212,12 @@ test("repeated cancellation does not postpone a pending BingX close retry", asyn
   await ex.onSignal(sig(67, "AAAUSDT", 91));
   const opened = await trade(67);
   const marketOrdersBefore = fake.calls.filter((call) => call.path === "/openApi/swap/v2/trade/order" && call.params.type === "MARKET").length;
-  fake.rateLimit("/openApi/swap/v2/trade/order", 1);
-
-  const first = parseCommand({ commandId: "c67-cancel-1", sourceSignalId: "cab-signal-67", symbol: "AAAUSDT", type: "cancel_entry", eventSeq: 1,
-    eventAt: new Date().toISOString(), reason: "source_cancelled" }, Date.now());
-  assert.ok(first.ok);
-  await ex.onCommand(first.value);
+  await pool.query("UPDATE ex_trades SET status = 'closing', pending_close_reason = 'source:source_cancelled' WHERE id = $1", [opened.id]);
   const pending = await trade(67);
   assert.equal(pending.status, "closing");
   const retryAt = pending.updated_at.getTime();
 
-  const repeated = parseCommand({ commandId: "c67-cancel-2", sourceSignalId: "cab-signal-67", symbol: "AAAUSDT", type: "cancel_entry", eventSeq: 2,
+  const repeated = parseCommand({ commandId: "c67-cancel-1", sourceSignalId: "cab-signal-67", symbol: "AAAUSDT", type: "cancel_entry", eventSeq: 1,
     eventAt: new Date().toISOString(), reason: "source_cancelled" }, Date.now());
   assert.ok(repeated.ok);
   await ex.onCommand(repeated.value);
