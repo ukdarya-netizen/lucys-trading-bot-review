@@ -42,6 +42,7 @@ export type SignalIn = {
 export type CommandIn = {
   commandId: string; sourceSignalId: string; symbol: string; type: "close" | "move_stop" | "cancel_entry" | "position_review";
   seq: number | null; at: number; reason: string; stopPrice: number | null; fraction: number | null;
+  sourceAction?: string | null; trackerStatus?: string | null;
 };
 
 type Runtime = { acct: Account; ex: BingX; locks: Map<string, Promise<unknown>>; hedge?: boolean };
@@ -443,40 +444,38 @@ export function createExecutor(deps: {
     ].filter(Boolean).join("\n"));
   }
 
+  async function recordSourcePositionReview(rt: Runtime, t: Trade, cmd: CommandIn): Promise<void> {
+    let exchangeState = "unavailable";
+    let exchangeQty: number | null = null;
+    let observationError: string | null = null;
+    try {
+      const position = await findPosition(rt, t, "normal");
+      exchangeState = position ? "open" : "not_found";
+      exchangeQty = position?.qty ?? null;
+    } catch (error) {
+      observationError = errText(error).slice(0, 160);
+    }
+    await event(rt.acct.id, t, "source_position_review", {
+      commandId: cmd.commandId, commandType: cmd.type, sourceReason: cmd.reason,
+      sourceAction: cmd.sourceAction ?? null, trackerStatus: cmd.trackerStatus ?? null,
+      ledgerStatus: t.status, exchangeState, exchangeQty, exchangeLookup: "symbol_side",
+      closePosition: false, observedAt: new Date(now()).toISOString(),
+      ...(observationError ? { observationError } : {}),
+    });
+  }
   // ---------------- commands from the source ----------------
   async function applyCommand(rt: Runtime, t: Trade, cmd: CommandIn): Promise<void> {
     if (cmd.seq !== null && cmd.seq <= t.last_command_seq) return; // already applied (or older)
     const done = () => updateTrade(t.id, { last_command_seq: cmd.seq ?? t.last_command_seq });
     const reviewOnly = cmd.type === "cancel_entry" || cmd.type === "position_review";
     if (["closed", "skipped", "failed"].includes(t.status)) {
-      if (reviewOnly) {
-        await event(rt.acct.id, t, "source_position_review", {
-          commandId: cmd.commandId, commandType: cmd.type, ledgerStatus: t.status,
-          exchangeState: "not_checked_terminal", closePosition: false,
-          observedAt: new Date(now()).toISOString(),
-        });
-      }
+      if (reviewOnly) await recordSourcePositionReview(rt, t, cmd);
       await done();
       return;
     }
     await event(rt.acct.id, t, "command", { ...cmd });
     if (reviewOnly) {
-      let exchangeState = "unavailable";
-      let exchangeQty: number | null = null;
-      let observationError: string | null = null;
-      try {
-        const position = await findPosition(rt, t, "normal");
-        exchangeState = position ? "open" : "not_found";
-        exchangeQty = position?.qty ?? null;
-      } catch (error) {
-        observationError = errText(error).slice(0, 160);
-      }
-      await event(rt.acct.id, t, "source_position_review", {
-        commandId: cmd.commandId, commandType: cmd.type, sourceReason: cmd.reason,
-        ledgerStatus: t.status, exchangeState, exchangeQty,
-        closePosition: false, observedAt: new Date(now()).toISOString(),
-        ...(observationError ? { observationError } : {}),
-      });
+      await recordSourcePositionReview(rt, t, cmd);
       await done();
       return;
     }
