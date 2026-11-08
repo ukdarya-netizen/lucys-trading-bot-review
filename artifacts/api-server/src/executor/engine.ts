@@ -25,7 +25,7 @@ import {
   takeFor, takePrice, topUpAmount, type Side,
 } from "./plan";
 import {
-  activeTrades, createTrade, event, getBtcSettings, getSourceSettings, symbolBusy, tradeById, tradesForSignal, updateTrade, type Trade,
+  activeTrades, createTrade, event, getBtcSettings, getSourceSettings, symbolBusy, tradeById, tradesForSignal, updateTrade, updateTradeCommandSequence, type Trade,
 } from "./store";
 import { fmt, pct, type Sender } from "./telegram";
 import { closeLine, resultLine, stopCloseKey, stopKindFor, stopMoveLine, type StopKind } from "./texts";
@@ -484,7 +484,7 @@ export function createExecutor(deps: {
   // ---------------- commands from the source ----------------
   async function applyCommand(rt: Runtime, t: Trade, cmd: CommandIn): Promise<void> {
     if (cmd.seq !== null && cmd.seq <= t.last_command_seq) return; // already applied (or older)
-    const done = () => updateTrade(t.id, { last_command_seq: cmd.seq ?? t.last_command_seq });
+    const done = () => cmd.seq === null ? Promise.resolve(t) : updateTradeCommandSequence(t.id, cmd.seq);
     const cancellation = isSourceCancellation(cmd);
     const reviewOnly = cmd.type === "position_review" && !cancellation;
     if (t.status === "closed") {
