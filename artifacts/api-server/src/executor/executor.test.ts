@@ -182,6 +182,8 @@ test("source cancellation and position review observe exchange state without clo
   const events = await pool.query("SELECT kind, detail FROM ex_events WHERE trade_id = $1 AND kind = 'source_position_review' ORDER BY id", [opened.id]);
   assert.equal(events.rowCount, 2);
   assert.ok(events.rows.every((row) => row.detail.exchangeState === "open" && row.detail.closePosition === false));
+  assert.equal(events.rows[1]!.detail.sourceAction, "review");
+  assert.equal(events.rows[1]!.detail.trackerStatus, "cancelled");
 });
 test("restart in the middle of an entry: the reconciler adopts the exchange position and protects it", async () => {
   fake.setPrice("BIRB-USDT", 100);
