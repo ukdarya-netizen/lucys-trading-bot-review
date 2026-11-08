@@ -47,6 +47,23 @@ export type CommandIn = {
 
 type Runtime = { acct: Account; ex: BingX; locks: Map<string, Promise<unknown>>; hedge?: boolean };
 
+type SourcePositionReview = {
+  exchangeState: "open" | "not_found" | "unavailable";
+  position: Position | null;
+  observationError: string | null;
+};
+
+const SOURCE_CANCEL_ACTIONS = new Set(["cancel", "cancelled", "canceled", "cancel_entry", "smart_cancel"]);
+function normalizeSourceAction(value: string | null | undefined): string {
+  return (value ?? "").trim().toLowerCase().replace(/[\s-]+/g, "_");
+}
+function isSourceCancellation(cmd: CommandIn): boolean {
+  if (cmd.type === "cancel_entry") return true;
+  if (cmd.type !== "position_review") return false;
+  return SOURCE_CANCEL_ACTIONS.has(normalizeSourceAction(cmd.sourceAction)) ||
+    SOURCE_CANCEL_ACTIONS.has(normalizeSourceAction(cmd.trackerStatus));
+}
+
 export const REASON_TEXT: Record<string, string> = {
   stale: "сигнал дошёл позже 10 минут после сообщения источника",
   already_in_position: "по монете уже открыта позиция",
@@ -444,31 +461,38 @@ export function createExecutor(deps: {
     ].filter(Boolean).join("\n"));
   }
 
-  async function recordSourcePositionReview(rt: Runtime, t: Trade, cmd: CommandIn): Promise<void> {
-    let exchangeState = "unavailable";
-    let exchangeQty: number | null = null;
+  async function recordSourcePositionReview(rt: Runtime, t: Trade, cmd: CommandIn): Promise<SourcePositionReview> {
+    let exchangeState: SourcePositionReview["exchangeState"] = "unavailable";
+    let position: Position | null = null;
     let observationError: string | null = null;
     try {
-      const position = await findPosition(rt, t, "normal");
+      position = await findPosition(rt, t, "normal");
       exchangeState = position ? "open" : "not_found";
-      exchangeQty = position?.qty ?? null;
     } catch (error) {
       observationError = errText(error).slice(0, 160);
     }
     await event(rt.acct.id, t, "source_position_review", {
       commandId: cmd.commandId, commandType: cmd.type, sourceReason: cmd.reason,
       sourceAction: cmd.sourceAction ?? null, trackerStatus: cmd.trackerStatus ?? null,
-      ledgerStatus: t.status, exchangeState, exchangeQty, exchangeLookup: "symbol_side",
-      closePosition: false, observedAt: new Date(now()).toISOString(),
+      ledgerStatus: t.status, exchangeState, exchangeQty: position?.qty ?? null,
+      exchangeLookup: "symbol_side", closeRequested: isSourceCancellation(cmd),
+      observedAt: new Date(now()).toISOString(),
       ...(observationError ? { observationError } : {}),
     });
+    return { exchangeState, position, observationError };
   }
   // ---------------- commands from the source ----------------
   async function applyCommand(rt: Runtime, t: Trade, cmd: CommandIn): Promise<void> {
     if (cmd.seq !== null && cmd.seq <= t.last_command_seq) return; // already applied (or older)
     const done = () => updateTrade(t.id, { last_command_seq: cmd.seq ?? t.last_command_seq });
-    const reviewOnly = cmd.type === "cancel_entry" || cmd.type === "position_review";
-    if (["closed", "skipped", "failed"].includes(t.status)) {
+    const cancellation = isSourceCancellation(cmd);
+    const reviewOnly = cmd.type === "position_review" && !cancellation;
+    if (t.status === "closed") {
+      if (reviewOnly || cancellation) await recordSourcePositionReview(rt, t, cmd);
+      await done();
+      return;
+    }
+    if (["skipped", "failed"].includes(t.status) && !cancellation) {
       if (reviewOnly) await recordSourcePositionReview(rt, t, cmd);
       await done();
       return;
@@ -479,6 +503,44 @@ export function createExecutor(deps: {
       await done();
       return;
     }
+    if (cancellation) {
+      const reason = "source:" + (cmd.reason || "cancelled");
+      const originalStatus = t.status;
+      const alreadyQueued = t.status === "closing" && t.pending_close_reason === reason;
+      const retryAsClosing = ["open", "closing", "skipped", "failed"].includes(t.status);
+      const pending = alreadyQueued ? t : await updateTrade(t.id, {
+        ...(retryAsClosing ? { status: "closing" } : {}),
+        pending_close_reason: reason,
+      });
+      const observation = await recordSourcePositionReview(rt, t, cmd);
+      if (observation.exchangeState === "open" && observation.position) {
+        const current = await tradeById(t.id) ?? pending;
+        const retryDue = !alreadyQueued || now() - t.updated_at.getTime() >= 60_000;
+        if (retryDue) {
+          const needsAdoption = current.status !== "closing" || !current.entry_price || !current.initial_qty;
+          const closeTrade = needsAdoption ? await updateTrade(t.id, {
+            status: "closing", pending_close_reason: reason, qty: observation.position.qty,
+            initial_qty: current.initial_qty ?? observation.position.qty,
+            entry_price: current.entry_price ?? observation.position.avgPrice,
+            opened_at: current.opened_at ?? current.entry_sent_at ?? new Date(now()),
+            liquidation_price: observation.position.liquidationPrice, margin: observation.position.margin,
+          }) : current;
+          await closeMarket(rt, closeTrade, reason);
+        }
+      } else if (observation.exchangeState === "not_found") {
+        if (["open", "closing"].includes(originalStatus)) {
+          const current = await tradeById(t.id);
+          if (current) await finalize(rt, current);
+        } else if (["skipped", "failed"].includes(originalStatus)) {
+          await updateTrade(t.id, { status: originalStatus, pending_close_reason: null });
+        }
+        // opening/unknown remain pending; reconcile checks the order and closes any late fill.
+      }
+      // unavailable remains persisted as closing (or pending on opening/unknown); reconcile retries.
+      // A repeated cancellation does not resend a recent market close; reconcile retries after 60 s.
+      await done();
+      return;
+    }
     // The bot manages this Nihilist trade itself: Nihilist's stop moves and closes are not followed,
     // except a close at the end of the holding time (the same limit as the bot's own).
     if (ownMgmt(t) && (cmd.type === "move_stop" || (cmd.type === "close" && cmd.reason !== "expired"))) { await done(); return; }
@@ -486,15 +548,14 @@ export function createExecutor(deps: {
       if (t.status === "open") await replaceStop(rt, t, cmd.stopPrice, cmd.reason);
       else await updateTrade(t.id, { stop_price: cmd.stopPrice });
     } else if (cmd.type === "close" && (t.status === "unknown" || t.status === "opening")) {
-      await updateTrade(t.id, { pending_close_reason: `source:${cmd.reason || "close"}` }); // closed as soon as the entry is found
+      await updateTrade(t.id, { pending_close_reason: "source:" + (cmd.reason || "close") }); // closed as soon as the entry is found
     } else if (cmd.type === "close") {
       const f = cmd.fraction ?? 1;
-      if (f >= 0.999 || !t.initial_qty) await closeMarket(rt, t, `source:${cmd.reason || "close"}`);
-      else await closeMarket(rt, t, `source:${cmd.reason || "close"}`, t.initial_qty * f);
+      if (f >= 0.999 || !t.initial_qty) await closeMarket(rt, t, "source:" + (cmd.reason || "close"));
+      else await closeMarket(rt, t, "source:" + (cmd.reason || "close"), t.initial_qty * f);
     }
     await done();
   }
-
   // ---------------- own management of Nihilist trades ----------------
   /**
    * Every reconcile pass (20 s) for a trade the bot manages itself: the peak
