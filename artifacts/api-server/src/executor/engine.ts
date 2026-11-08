@@ -40,7 +40,7 @@ export type SignalIn = {
   maxHoldH?: number | null;
 };
 export type CommandIn = {
-  commandId: string; sourceSignalId: string; symbol: string; type: "close" | "move_stop" | "cancel_entry";
+  commandId: string; sourceSignalId: string; symbol: string; type: "close" | "move_stop" | "cancel_entry" | "position_review";
   seq: number | null; at: number; reason: string; stopPrice: number | null; fraction: number | null;
 };
 
@@ -447,15 +447,43 @@ export function createExecutor(deps: {
   async function applyCommand(rt: Runtime, t: Trade, cmd: CommandIn): Promise<void> {
     if (cmd.seq !== null && cmd.seq <= t.last_command_seq) return; // already applied (or older)
     const done = () => updateTrade(t.id, { last_command_seq: cmd.seq ?? t.last_command_seq });
-    if (["closed", "skipped", "failed"].includes(t.status)) { await done(); return; }
+    const reviewOnly = cmd.type === "cancel_entry" || cmd.type === "position_review";
+    if (["closed", "skipped", "failed"].includes(t.status)) {
+      if (reviewOnly) {
+        await event(rt.acct.id, t, "source_position_review", {
+          commandId: cmd.commandId, commandType: cmd.type, ledgerStatus: t.status,
+          exchangeState: "not_checked_terminal", closePosition: false,
+          observedAt: new Date(now()).toISOString(),
+        });
+      }
+      await done();
+      return;
+    }
     await event(rt.acct.id, t, "command", { ...cmd });
+    if (reviewOnly) {
+      let exchangeState = "unavailable";
+      let exchangeQty: number | null = null;
+      let observationError: string | null = null;
+      try {
+        const position = await findPosition(rt, t, "normal");
+        exchangeState = position ? "open" : "not_found";
+        exchangeQty = position?.qty ?? null;
+      } catch (error) {
+        observationError = errText(error).slice(0, 160);
+      }
+      await event(rt.acct.id, t, "source_position_review", {
+        commandId: cmd.commandId, commandType: cmd.type, sourceReason: cmd.reason,
+        ledgerStatus: t.status, exchangeState, exchangeQty,
+        closePosition: false, observedAt: new Date(now()).toISOString(),
+        ...(observationError ? { observationError } : {}),
+      });
+      await done();
+      return;
+    }
     // The bot manages this Nihilist trade itself: Nihilist's stop moves and closes are not followed,
     // except a close at the end of the holding time (the same limit as the bot's own).
     if (ownMgmt(t) && (cmd.type === "move_stop" || (cmd.type === "close" && cmd.reason !== "expired"))) { await done(); return; }
-    if (cmd.type === "cancel_entry") {
-      if (t.status === "opening") await skip(rt, t, "source_cancelled");
-      else await closeMarket(rt, t, `source:${cmd.reason || "cancel"}`);
-    } else if (cmd.type === "move_stop" && cmd.stopPrice !== null) {
+    if (cmd.type === "move_stop" && cmd.stopPrice !== null) {
       if (t.status === "open") await replaceStop(rt, t, cmd.stopPrice, cmd.reason);
       else await updateTrade(t.id, { stop_price: cmd.stopPrice });
     } else if (cmd.type === "close" && (t.status === "unknown" || t.status === "opening")) {
