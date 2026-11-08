@@ -180,6 +180,11 @@ test("source cancellation closes the confirmed side and preserves opposite-side 
   assert.equal(review.rowCount, 1);
   assert.equal(review.rows[0]!.detail.exchangeState, "open");
   assert.equal(review.rows[0]!.detail.closeRequested, true);
+  const cleanup = parseCommand({ commandId: "c64-cleanup", sourceSignalId: "cab-signal-64", symbol: "BIRBUSDT", type: "close", eventSeq: 1,
+    eventAt: new Date().toISOString(), reason: "test_cleanup" }, Date.now());
+  assert.ok(cleanup.ok);
+  await ex.onCommand(cleanup.value);
+  assert.equal((await trade(64)).status, "closed");
 });
 
 test("cancelled position_review closes; reclassified position_review only observes", async () => {
@@ -206,6 +211,11 @@ test("cancelled position_review closes; reclassified position_review only observ
   const events = await pool.query("SELECT detail FROM ex_events WHERE trade_id = $1 AND kind = 'source_position_review'", [openedReview.id]);
   assert.equal(events.rowCount, 1);
   assert.equal(events.rows[0]!.detail.closeRequested, false);
+  const cleanup = parseCommand({ commandId: "c66-cleanup", sourceSignalId: "cab-signal-66", symbol: "YYYUSDT", type: "close", eventSeq: 2,
+    eventAt: new Date().toISOString(), reason: "test_cleanup" }, Date.now());
+  assert.ok(cleanup.ok);
+  await ex.onCommand(cleanup.value);
+  assert.equal((await trade(66)).status, "closed");
 });
 test("repeated cancellation does not postpone a pending BingX close retry", async () => {
   fake.setPrice("AAA-USDT", 100);
