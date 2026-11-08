@@ -70,7 +70,7 @@ export function parseCommand(b: any, now: number): Parsed<CommandIn> {
   if (!/^[A-Za-z0-9_-]{1,100}$/.test(commandId)) return { ok: false, code: "invalid_commandId" };
   if (!/^(cab|nh)-signal-[1-9]\d*$/.test(sourceSignalId)) return { ok: false, code: "invalid_sourceSignalId" };
   const type = String(b.type ?? "");
-  if (type !== "close" && type !== "move_stop" && type !== "cancel_entry") return { ok: false, code: "invalid_type" };
+  if (type !== "close" && type !== "move_stop" && type !== "cancel_entry" && type !== "position_review") return { ok: false, code: "invalid_type" };
   const seqRaw = b.sequence ?? b.eventSeq;
   const seq = seqRaw === undefined || seqRaw === null ? null : Number(seqRaw);
   if (seq !== null && !(Number.isSafeInteger(seq) && seq >= 1)) return { ok: false, code: "invalid_sequence" };
