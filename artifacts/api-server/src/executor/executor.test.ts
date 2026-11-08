@@ -207,6 +207,34 @@ test("cancelled position_review closes; reclassified position_review only observ
   assert.equal(events.rowCount, 1);
   assert.equal(events.rows[0]!.detail.closeRequested, false);
 });
+test("repeated cancellation does not postpone a pending BingX close retry", async () => {
+  fake.setPrice("AAA-USDT", 100);
+  await ex.onSignal(sig(67, "AAAUSDT", 91));
+  const opened = await trade(67);
+  const marketOrdersBefore = fake.calls.filter((call) => call.path === "/openApi/swap/v2/trade/order" && call.params.type === "MARKET").length;
+  fake.rateLimit("/openApi/swap/v2/trade/order", 1);
+
+  const first = parseCommand({ commandId: "c67-cancel-1", sourceSignalId: "cab-signal-67", symbol: "AAAUSDT", type: "cancel_entry", eventSeq: 1,
+    eventAt: new Date().toISOString(), reason: "source_cancelled" }, Date.now());
+  assert.ok(first.ok);
+  await ex.onCommand(first.value);
+  const pending = await trade(67);
+  assert.equal(pending.status, "closing");
+  const retryAt = pending.updated_at.getTime();
+
+  const repeated = parseCommand({ commandId: "c67-cancel-2", sourceSignalId: "cab-signal-67", symbol: "AAAUSDT", type: "cancel_entry", eventSeq: 2,
+    eventAt: new Date().toISOString(), reason: "source_cancelled" }, Date.now());
+  assert.ok(repeated.ok);
+  await ex.onCommand(repeated.value);
+  assert.equal((await trade(67)).updated_at.getTime(), retryAt, "recording a later command must not reset close retry timing");
+  assert.equal(fake.calls.filter((call) => call.path === "/openApi/swap/v2/trade/order" && call.params.type === "MARKET").length, marketOrdersBefore);
+
+  await pool.query("UPDATE ex_trades SET updated_at = now() - interval '61 seconds' WHERE id = $1", [opened.id]);
+  await ex.reconcileAll();
+  assert.equal((await trade(67)).status, "closed");
+  assert.equal(fake.calls.filter((call) => call.path === "/openApi/swap/v2/trade/order" && call.params.type === "MARKET").length, marketOrdersBefore + 1);
+});
+
 test("restart in the middle of an entry: the reconciler adopts the exchange position and protects it", async () => {
   fake.setPrice("BIRB-USDT", 100);
   // An order that reached the exchange, but the process died before booking it.
