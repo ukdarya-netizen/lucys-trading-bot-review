@@ -84,6 +84,8 @@ export function parseCommand(b: any, now: number): Parsed<CommandIn> {
     value: {
       commandId, sourceSignalId, symbol: String(b.symbol ?? "").toUpperCase().replace("-", ""), type, seq,
       at: Number.isFinite(atRaw) ? atRaw : now, reason: String(b.reason ?? type), stopPrice, fraction: b.partial === true || (f !== null && f < 1) ? f : null,
+      sourceAction: typeof b.action === "string" ? b.action.slice(0, 40) : null,
+      trackerStatus: typeof b.trackerStatus === "string" ? b.trackerStatus.slice(0, 40) : null,
     },
   };
 }
