@@ -16,7 +16,7 @@
  * off, size, subscribers, and a strategy — "source" (Nihilist leads by its
  * commands) or one the bot manages itself on the live price (manage()).
  */
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { pool } from "@workspace/db";
 import { BingXError, decimalAt, exSymbol, type BingX, type Order, type Position } from "./bingx";
 import { LEVERAGE, marginFor, type Account } from "./accounts";
@@ -25,11 +25,14 @@ import {
   takeFor, takePrice, topUpAmount, type Side,
 } from "./plan";
 import {
-  activeTrades, commandsForSignal, createTrade, event, getBtcSettings, getSourceSettings, symbolBusy, tradeById, tradesForSignal, updateTrade, type Trade,
+  activeTrades, commandsForSignal, createTrade, event, getBtcSettings, getSourceSettings, symbolBusy, tradeById, tradesForSignal, updateTrade,
+  updateTradeCommandSequence, type Trade,
 } from "./store";
+import { productionTrading } from "./trading-controls";
 import { fmt, pct, type Sender } from "./telegram";
 import { cancelKey, closeLine, isCancelReason, resultLine, stopCloseKey, stopKindFor, stopMoveLine, type StopKind } from "./texts";
 import { parseCommand } from "./intake";
+import { sourceActionKind, sourceSyncConfirmed, type SourceSyncStatus } from "./source-state";
 
 export type SignalIn = {
   sourceSignalId: string; source: string; symbol: string; side: Side; pattern: string | null;
@@ -47,11 +50,6 @@ export type CommandIn = {
   sourceAction?: string | null; trackerStatus?: string | null;
 };
 
-/** Owner 2026-11-09: a review that says the source cancelled or reclassified the signal is a cancellation. */
-const REVIEW_CANCEL = new Set(["cancel", "cancelled", "canceled", "cancel_entry", "smart_cancel", "reclassified"]);
-const norm = (v: string | null | undefined) => (v ?? "").trim().toLowerCase().replace(/[\s-]+/g, "_");
-export const reviewIsCancellation = (cmd: CommandIn) =>
-  cmd.type === "position_review" && (REVIEW_CANCEL.has(norm(cmd.sourceAction)) || REVIEW_CANCEL.has(norm(cmd.trackerStatus)));
 
 type Runtime = { acct: Account; ex: BingX; locks: Map<string, Promise<unknown>>; hedge?: boolean };
 
@@ -81,12 +79,24 @@ export function createExecutor(deps: {
   entryAllowed: (account: Account, releasedAt: number, source: string) => Promise<boolean>;
   bingx: (a: Account) => BingX;
   send: Sender;
+  sourceSyncStatus?: (source: string) => SourceSyncStatus | null | undefined;
   now?: () => number;
   log?: (msg: string, extra?: unknown) => void;
 }) {
   const now = deps.now ?? Date.now;
   const log = deps.log ?? (() => undefined);
   const runtimes = new Map<string, Runtime>();
+  type ReconcileIssue = { source?: string; symbol?: string; message: string; kind?: "untracked" };
+  type OrphanObservation = { count: number; at: number };
+  const orphanObservations = new Map<string, OrphanObservation>();
+  const lastIdlePositionAudit = new Map<string, number>();
+  const ORPHAN_CONFIRMATIONS = 3;
+  const ORPHAN_MIN_OBSERVATION_GAP_MS = 15_000;
+  const ORPHAN_MAX_OBSERVATION_GAP_MS = 120_000;
+  const ORPHAN_CLOSE_RETRY_MS = 60_000;
+  const ORPHAN_CLOSE_MAX_ATTEMPTS_PER_HOUR = 3;
+  const IDLE_POSITION_AUDIT_MS = 60_000;
+  const RECONCILE_MATCH_NOTICE_COOLDOWN_MS = 10 * 60_000;
 
   async function refreshAccounts(): Promise<Runtime[]> {
     const list = await deps.loadAccounts();
@@ -113,6 +123,348 @@ export function createExecutor(deps: {
   const head = (rt: Runtime, t: { symbol: string; source?: string }) =>
     `${t.source ? `${SRC[t.source] ?? t.source} · ` : ""}${t.symbol.replace(/-?USDT$/, "")} · ${rt.acct.label}`;
   const say = (text: string) => deps.send(text).catch(() => undefined);
+  async function reportReconcileIssues(rt: Runtime, issues: ReconcileIssue[]): Promise<void> {
+    const accountId = rt.acct.id;
+    let notice: string | null = null;
+    const hasIssues = issues.length > 0;
+    try {
+      const client = await pool.connect();
+      try {
+        await client.query("BEGIN");
+        await client.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [`reconcile-notice:${accountId}`]);
+        const previous = await client.query<{ detail: Record<string, unknown> }>(
+          "SELECT detail FROM ex_events WHERE account_id = $1 AND kind = 'reconcile_notice_state' ORDER BY id DESC LIMIT 1",
+          [accountId],
+        );
+        const prior = previous.rows[0]?.detail ?? {};
+        const priorState = String(prior.state ?? "");
+        const incidentActive = Boolean(prior.incidentActive);
+        let state: string;
+        let cleanStreak: number;
+
+        if (hasIssues) {
+          state = "unverified";
+          cleanStreak = 0;
+          if (priorState === "unverified") {
+            await client.query("COMMIT");
+            return;
+          }
+        } else {
+          if (priorState === "matched") {
+            await client.query("COMMIT");
+            return;
+          }
+          const priorAt = Date.parse(String(prior.updatedAt ?? ""));
+          if (priorState === "recovering" && Number.isFinite(priorAt) && now() - priorAt < ORPHAN_MIN_OBSERVATION_GAP_MS) {
+            await client.query("COMMIT");
+            return;
+          }
+          cleanStreak = priorState === "recovering" ? Number(prior.cleanStreak ?? 0) + 1 : 1;
+          state = cleanStreak >= ORPHAN_CONFIRMATIONS ? "matched" : "recovering";
+          if (state === "matched") {
+            const lastMatchedNoticeAt = Date.parse(String(prior.lastMatchedNoticeAt ?? ""));
+            if (!Number.isFinite(lastMatchedNoticeAt) || now() - lastMatchedNoticeAt >= RECONCILE_MATCH_NOTICE_COOLDOWN_MS) {
+              notice = `${rt.acct.label} · Сверка подтверждена: позиции этого счёта совпадают с BingX; синхронизация источников подтверждена.`;
+              prior.lastMatchedNoticeAt = new Date(now()).toISOString();
+            }
+          }
+        }
+
+        await client.query(
+          `INSERT INTO ex_events (account_id, trade_id, source_signal_id, symbol, kind, detail)
+           VALUES ($1, NULL, NULL, NULL, 'reconcile_notice_state', $2)`,
+          [accountId, JSON.stringify({
+            state,
+            cleanStreak,
+            incidentActive: hasIssues || (state !== "matched" && incidentActive),
+            message: issues[0]?.message ?? null,
+            lastMatchedNoticeAt: prior.lastMatchedNoticeAt ?? null,
+            updatedAt: new Date(now()).toISOString(),
+          })],
+        );
+        await client.query("COMMIT");
+      } catch (e) {
+        await client.query("ROLLBACK").catch(() => undefined);
+        throw e;
+      } finally {
+        client.release();
+      }
+    } catch (e) {
+      log("executor: reconcile notification state failed", e);
+      return;
+    }
+    if (notice) await say(notice);
+  }
+
+  function resetOrphanObservations(accountId: string): void {
+    const prefix = `${accountId}|`;
+    for (const key of orphanObservations.keys()) {
+      if (key.startsWith(prefix)) orphanObservations.delete(key);
+    }
+  }
+
+  async function closeUntrackedPosition(rt: Runtime, position: Position): Promise<boolean> {
+    // Automatic exchange closes are limited to the owner's real/demo accounts.
+    // Subscriber and simulated accounts are never affected by this rule.
+    if (!productionTrading() || !rt.acct.id.startsWith("owner-") || rt.acct.subscriberId !== null || rt.acct.paper) return false;
+
+    const symbol = exSymbol(position.symbol);
+    const side = position.positionSide;
+    const lockKey = `orphan-close:${rt.acct.id}:${symbol}:${side}`;
+    const client = await pool.connect().catch((e) => {
+      log("executor: orphan close lock unavailable", e);
+      return null;
+    });
+    if (!client) return false;
+    let locked = false;
+    try {
+      await client.query("SELECT pg_advisory_lock(hashtextextended($1, 0))", [lockKey]);
+      locked = true;
+
+      const matchingTrade = (await activeTrades(rt.acct.id)).some((trade) =>
+        exSymbol(trade.symbol) === symbol && posSide(trade.side) === side);
+      if (matchingTrade) return true;
+
+      const attempts = await client.query<{ count: number }>(
+        `SELECT count(*)::int AS count FROM ex_events
+         WHERE account_id = $1 AND symbol = $2 AND kind = 'orphan_close_attempt'
+           AND detail->>'positionSide' = $3 AND detail->>'clientOrderId' IS NOT NULL
+           AND created_at > now() - interval '1 hour'`,
+        [rt.acct.id, symbol, side],
+      );
+      if (Number(attempts.rows[0]?.count ?? 0) >= ORPHAN_CLOSE_MAX_ATTEMPTS_PER_HOUR) {
+        log("executor: orphan close halted after attempt limit", { accountId: rt.acct.id, symbol, side });
+        return false;
+      }
+
+      const lastAttempt = await client.query<{ detail: Record<string, unknown>; created_at: Date }>(
+        `SELECT detail, created_at FROM ex_events
+         WHERE account_id = $1 AND symbol = $2 AND kind = 'orphan_close_attempt'
+           AND detail->>'positionSide' = $3
+         ORDER BY id DESC LIMIT 1`,
+        [rt.acct.id, symbol, side],
+      );
+      const priorAttempt = lastAttempt.rows[0];
+      if (priorAttempt && now() - new Date(priorAttempt.created_at).getTime() < ORPHAN_CLOSE_RETRY_MS) return false;
+      const priorClientOrderId = String(priorAttempt?.detail?.clientOrderId ?? "");
+      if (priorClientOrderId) {
+        // A timed-out market request may still have reached BingX. Never resend
+        // while its order is pending or while order status cannot be read.
+        const priorOrder = await rt.ex.queryOrder(symbol, { clientOrderId: priorClientOrderId }, "protect");
+        if (priorOrder && !["FILLED", "CANCELED", "EXPIRED", "REJECTED"].includes(priorOrder.status)) {
+          const open = await rt.ex.openOrders(symbol, "protect");
+          if (open.some((order) => order.orderId === priorOrder.orderId)) return false;
+        }
+      }
+
+      const currentPositions = await rt.ex.positions(symbol, "protect");
+      const current = currentPositions.find((item) => item.symbol === symbol && item.positionSide === side);
+      const latestTrades = await activeTrades(rt.acct.id);
+      if (latestTrades.some((trade) => exSymbol(trade.symbol) === symbol && posSide(trade.side) === side)) return true;
+      if (!current) {
+        await client.query(
+          `INSERT INTO ex_events (account_id, trade_id, source_signal_id, symbol, kind, detail)
+           VALUES ($1, NULL, NULL, $2, 'orphan_close_attempt', $3)`,
+          [rt.acct.id, symbol, JSON.stringify({ positionSide: side, status: "position_absent", cleanupPending: true })],
+        );
+        return false;
+      }
+
+      const attemptRow = await client.query<{ id: number }>(
+        `INSERT INTO ex_events (account_id, trade_id, source_signal_id, symbol, kind, detail)
+         VALUES ($1, NULL, NULL, $2, 'orphan_close_attempt', $3) RETURNING id`,
+        [rt.acct.id, symbol, JSON.stringify({ positionSide: side, qty: current.qty, status: "preflight", cleanupPending: true })],
+      );
+      const attemptId = attemptRow.rows[0]?.id;
+      if (!attemptId) return false;
+
+      const contract = await rt.ex.contract(symbol, "protect");
+      const quantity = decimalAt(current.qty, contract.quantityPrecision, "floor");
+      if (!(Number(quantity) > 0)) {
+        await client.query(
+          "UPDATE ex_events SET detail = detail || $2::jsonb WHERE id = $1",
+          [attemptId, JSON.stringify({ status: "preflight_failed", error: "rounded quantity is zero", cleanupPending: true })],
+        );
+        return false;
+      }
+      const clientOrderId = `oc${randomUUID().replace(/-/g, "").slice(0, 24)}`;
+      await client.query(
+        "UPDATE ex_events SET detail = detail || $2::jsonb WHERE id = $1",
+        [attemptId, JSON.stringify({ clientOrderId, qty: Number(quantity), status: "pending", cleanupPending: true })],
+      );
+
+      try {
+        const order = await rt.ex.placeOrder({
+          symbol,
+          side: side === "LONG" ? "SELL" : "BUY",
+          positionSide: side,
+          type: "MARKET",
+          quantity,
+          clientOrderId,
+        }, "protect");
+        await client.query(
+          "UPDATE ex_events SET detail = detail || $2::jsonb WHERE id = $1",
+          [attemptId, JSON.stringify({ status: "sent", orderId: order.orderId, executedQty: order.executedQty, cleanupPending: true })],
+        );
+        log("executor: orphan BingX position close sent", { accountId: rt.acct.id, symbol, side, qty: quantity, orderId: order.orderId });
+      } catch (e) {
+        await client.query(
+          "UPDATE ex_events SET detail = detail || $2::jsonb WHERE id = $1",
+          [attemptId, JSON.stringify({
+            status: e instanceof BingXError && e.ambiguous ? "ambiguous" : "rejected",
+            error: errText(e),
+            cleanupPending: true,
+          })],
+        ).catch(() => undefined);
+        log("executor: orphan BingX position close failed", { accountId: rt.acct.id, symbol, side, error: errText(e) });
+      }
+      return false;
+    } catch (e) {
+      log("executor: orphan position close check failed", { accountId: rt.acct.id, symbol, side, error: errText(e) });
+      return false;
+    } finally {
+      if (locked) await client.query("SELECT pg_advisory_unlock(hashtextextended($1, 0))", [lockKey]).catch(() => undefined);
+      client.release();
+    }
+  }
+
+  async function cleanupPendingOrphanOrders(rt: Runtime, positions: Position[]): Promise<ReconcileIssue[]> {
+    if (!productionTrading() || !rt.acct.id.startsWith("owner-") || rt.acct.subscriberId !== null || rt.acct.paper) return [];
+    const pending = await pool.query<{ id: number; symbol: string; detail: Record<string, unknown> }>(
+      `SELECT DISTINCT ON (symbol, detail->>'positionSide') id, symbol, detail
+       FROM ex_events
+       WHERE account_id = $1 AND kind = 'orphan_close_attempt' AND detail->>'cleanupPending' = 'true'
+       ORDER BY symbol, detail->>'positionSide', id DESC`,
+      [rt.acct.id],
+    );
+    const issues: ReconcileIssue[] = [];
+    for (const row of pending.rows) {
+      const symbol = exSymbol(row.symbol);
+      const side = String(row.detail.positionSide ?? "");
+      if (side !== "LONG" && side !== "SHORT") continue;
+      if (positions.some((position) => position.symbol === symbol && position.positionSide === side)) continue;
+
+      const lockKey = `orphan-close:${rt.acct.id}:${symbol}:${side}`;
+      const client = await pool.connect().catch((e) => {
+        log("executor: orphan order cleanup lock unavailable", e);
+        return null;
+      });
+      if (!client) {
+        issues.push({ symbol, kind: "untracked", message: "Protective order cleanup is not confirmed" });
+        continue;
+      }
+      let locked = false;
+      try {
+        await client.query("SELECT pg_advisory_lock(hashtextextended($1, 0))", [lockKey]);
+        locked = true;
+        const currentEvent = await client.query<{ detail: Record<string, unknown> }>(
+          "SELECT detail FROM ex_events WHERE id = $1 AND account_id = $2",
+          [row.id, rt.acct.id],
+        );
+        const detail = currentEvent.rows[0]?.detail;
+        if (!detail || detail.cleanupPending !== true) continue;
+        const lastCleanupAt = Date.parse(String(detail.cleanupAttemptAt ?? ""));
+        if (Number.isFinite(lastCleanupAt) && now() - lastCleanupAt < ORPHAN_CLOSE_RETRY_MS) {
+          issues.push({ symbol, kind: "untracked", message: "Protective order cleanup is pending" });
+          continue;
+        }
+        await client.query(
+          `UPDATE ex_events SET detail = detail || $4::jsonb
+           WHERE account_id = $1 AND symbol = $2 AND kind = 'orphan_close_attempt'
+             AND detail->>'positionSide' = $3 AND detail->>'cleanupPending' = 'true'`,
+          [rt.acct.id, symbol, side, JSON.stringify({ cleanupAttemptAt: new Date(now()).toISOString() })],
+        );
+
+        const active = await activeTrades(rt.acct.id);
+        if (active.some((trade) => exSymbol(trade.symbol) === symbol && posSide(trade.side) === side)) {
+          await client.query(
+            `UPDATE ex_events SET detail = detail || '{"cleanupPending":false,"cleanupSkipped":"active_trade"}'::jsonb
+             WHERE account_id = $1 AND symbol = $2 AND kind = 'orphan_close_attempt'
+               AND detail->>'positionSide' = $3 AND detail->>'cleanupPending' = 'true'`,
+            [rt.acct.id, symbol, side],
+          );
+          continue;
+        }
+        const fresh = await rt.ex.positions(symbol, "protect");
+        if (fresh.some((position) => position.symbol === symbol && position.positionSide === side)) {
+          issues.push({ symbol, kind: "untracked", message: "Position remains open; protective orders retained" });
+          continue;
+        }
+
+        const open = await rt.ex.openOrders(symbol, "protect");
+        const protective = open.filter((order) =>
+          order.positionSide === side && /^(STOP|TAKE_PROFIT)/i.test(order.type));
+        for (const order of protective) await rt.ex.cancelOrder(symbol, order.orderId);
+        const remaining = await rt.ex.openOrders(symbol, "protect");
+        const stillOpen = remaining.some((order) =>
+          order.positionSide === side && /^(STOP|TAKE_PROFIT)/i.test(order.type));
+        if (stillOpen) {
+          issues.push({ symbol, kind: "untracked", message: "Protective orders remain open" });
+          continue;
+        }
+        await client.query(
+          `UPDATE ex_events SET detail = detail || $4::jsonb
+           WHERE account_id = $1 AND symbol = $2 AND kind = 'orphan_close_attempt'
+             AND detail->>'positionSide' = $3 AND detail->>'cleanupPending' = 'true'`,
+          [rt.acct.id, symbol, side, JSON.stringify({
+            cleanupPending: false,
+            ordersCleanedAt: new Date(now()).toISOString(),
+            cancelledOrderIds: protective.map((order) => order.orderId),
+          })],
+        );
+        await say(`${rt.acct.label} · ${symbol.replace(/-/g, "")} ${side.toLowerCase()}: позиция закрыта после сверки с BingX; защитных заявок этой стороны не осталось. В «Открытых» записи не было.`);
+      } catch (e) {
+        log("executor: orphan protective order cleanup failed", { accountId: rt.acct.id, symbol, side, error: errText(e) });
+        issues.push({ symbol, kind: "untracked", message: "Protective order cleanup failed" });
+      } finally {
+        if (locked) await client.query("SELECT pg_advisory_unlock(hashtextextended($1, 0))", [lockKey]).catch(() => undefined);
+        client.release();
+      }
+    }
+    return issues;
+  }
+
+  async function reportUntrackedPositions(rt: Runtime, trades: Trade[], positions: Position[]): Promise<ReconcileIssue[]> {
+    const tracked = new Set(trades.map((trade) => `${exSymbol(trade.symbol)}:${posSide(trade.side)}`));
+    const current = new Set<string>();
+    const issues: ReconcileIssue[] = [];
+    for (const position of positions) {
+      if (!Number.isFinite(position.qty) || Math.abs(position.qty) <= 1e-12) continue;
+      if (tracked.has(`${position.symbol}:${position.positionSide}`)) continue;
+      const key = `${rt.acct.id}|${position.symbol}|${position.positionSide}`;
+      current.add(key);
+      const observedAt = now();
+      const previous = orphanObservations.get(key);
+      let count = 1;
+      let at = observedAt;
+      if (previous && observedAt - previous.at <= ORPHAN_MAX_OBSERVATION_GAP_MS) {
+        if (observedAt - previous.at < ORPHAN_MIN_OBSERVATION_GAP_MS) {
+          count = previous.count;
+          at = previous.at;
+        } else {
+          count = previous.count + 1;
+        }
+      }
+      orphanObservations.set(key, { count, at });
+      if (count >= ORPHAN_CONFIRMATIONS) {
+        const resolved = await closeUntrackedPosition(rt, position);
+        if (resolved) {
+          orphanObservations.delete(key);
+          continue;
+        }
+      }
+      issues.push({
+        symbol: position.symbol,
+        kind: "untracked",
+        message: `BingX position ${position.symbol} ${position.positionSide} has no active bot trade`,
+      });
+    }
+    const prefix = `${rt.acct.id}|`;
+    for (const key of orphanObservations.keys()) {
+      if (key.startsWith(prefix) && !current.has(key)) orphanObservations.delete(key);
+    }
+    return issues;
+  }
   // Price factor of a trade whose symbol differs on BingX (source price × factor = BingX price).
   const factors = new Map<number, number>();
   async function factorOf(t: { id: number }): Promise<number> {
@@ -504,29 +856,136 @@ export function createExecutor(deps: {
     await say([
       `${head(rt, cur)} · ${cur.side === "long" ? "лонг" : "шорт"}`,
       `Позиция закрыта. ${closeLine(reason, { source: cur.source, takePct: cur.take_pct })}.`,
+      `Сверка BingX подтверждена: позиции нет; запись убрана из «Открытых» (обновление в кабинете — до 15 секунд).`,
       `Вход ${fmt(cur.entry_price)} → выход ${fmt(last?.avgPrice ?? exit)}${closing.length > 1 ? ` (средний выход по всем частям ${fmt(exit)})` : ""}`,
       resultLine(cur.pnl_pct, result, asset) + (cur.partial_done || closing.length > 1 ? " — с учётом частичных закрытий" : ""),
       histError ? `Цену выхода BingX не отдал (${histError}) — результат не посчитан, сверьте на бирже.` : "",
     ].filter(Boolean).join("\n"));
   }
 
+  async function recordSourcePositionReview(
+    rt: Runtime,
+    t: Trade,
+    cmd: CommandIn,
+  ): Promise<{ exchangeState: "open" | "not_found" | "unavailable"; position: Position | null }> {
+    let position: Position | null = null;
+    let exchangeState: "open" | "not_found" | "unavailable" = "unavailable";
+    let observationError: string | null = null;
+    try {
+      position = await findPosition(rt, t, "normal");
+      exchangeState = position ? "open" : "not_found";
+    } catch (error) {
+      observationError = errText(error).slice(0, 160);
+    }
+    await event(rt.acct.id, t, "source_position_review", {
+      commandId: cmd.commandId,
+      commandType: cmd.type,
+      sourceReason: cmd.reason,
+      sourceAction: cmd.sourceAction ?? null,
+      trackerStatus: cmd.trackerStatus ?? null,
+      ledgerStatus: t.status,
+      exchangeState,
+      exchangeQty: position?.qty ?? null,
+      exchangeLookup: "symbol_side",
+      closeRequested: cmd.type === "cancel_entry" ||
+        (cmd.type === "position_review" &&
+          (sourceActionKind(cmd.sourceAction ?? "") === "close" || sourceActionKind(cmd.trackerStatus ?? "") === "close")),
+      observedAt: new Date(now()).toISOString(),
+      ...(observationError ? { observationError } : {}),
+    });
+    return { exchangeState, position };
+  }
+
+  const isSourceCancellation = (cmd: CommandIn) =>
+    cmd.type === "cancel_entry" || (cmd.type === "position_review" &&
+      (sourceActionKind(cmd.sourceAction ?? "") === "close" || sourceActionKind(cmd.trackerStatus ?? "") === "close"));
+
   // ---------------- commands from the source ----------------
   async function applyCommand(rt: Runtime, t: Trade, cmd: CommandIn): Promise<void> {
     if (cmd.seq !== null && cmd.seq <= t.last_command_seq) return; // already applied (or older)
-    const done = () => updateTrade(t.id, { last_command_seq: cmd.seq ?? t.last_command_seq });
-    if (["closed", "skipped", "failed"].includes(t.status)) { await done(); return; }
+    const done = () => cmd.seq === null ? Promise.resolve(t) : updateTradeCommandSequence(t.id, cmd.seq);
+    const cancellation = isSourceCancellation(cmd);
+    const reviewOnly = cmd.type === "position_review" && !cancellation;
+    if (t.status === "closed") {
+      if (reviewOnly || cancellation) await recordSourcePositionReview(rt, t, cmd);
+      await done();
+      return;
+    }
+    if (["skipped", "failed"].includes(t.status) && !cancellation) {
+      if (reviewOnly) await recordSourcePositionReview(rt, t, cmd);
+      await done();
+      return;
+    }
     await event(rt.acct.id, t, "command", { ...cmd });
+    if (reviewOnly) {
+      await recordSourcePositionReview(rt, t, cmd);
+      await done();
+      return;
+    }
+    if (cancellation) {
+      // Owner 2026-11-09: a cancellation is booked as a cancellation (cancel:<reason>), never as an ordinary close.
+      const reason = cancelKey(cmd.type === "position_review" ? (cmd.trackerStatus || cmd.sourceAction || cmd.reason) : cmd.reason);
+      const originalStatus = t.status;
+      const alreadyQueued = t.status === "closing" && sourcePending(t.pending_close_reason);
+      const retryAsClosing = ["open", "closing", "skipped", "failed"].includes(t.status);
+      const pending = alreadyQueued ? t : await updateTrade(t.id, {
+        ...(retryAsClosing ? { status: "closing" as const } : {}),
+        pending_close_reason: reason,
+      });
+      const observation = await recordSourcePositionReview(rt, t, cmd);
+      if (observation.exchangeState === "open" && observation.position) {
+        const current = await tradeById(t.id) ?? pending;
+        const retryDue = !alreadyQueued || now() - t.updated_at.getTime() >= 60_000;
+        if (retryDue) {
+          const needsAdoption = current.status !== "closing" || !current.entry_price || !current.initial_qty;
+          const closeTrade = needsAdoption ? await updateTrade(t.id, {
+            status: "closing",
+            pending_close_reason: reason,
+            qty: observation.position.qty,
+            initial_qty: current.initial_qty ?? observation.position.qty,
+            entry_price: current.entry_price ?? observation.position.avgPrice,
+            opened_at: current.opened_at ?? current.entry_sent_at ?? new Date(now()),
+            liquidation_price: observation.position.liquidationPrice,
+            margin: observation.position.margin,
+          }) : current;
+          await closeMarket(rt, closeTrade, reason);
+        }
+      } else if (observation.exchangeState === "not_found") {
+        const current = await tradeById(t.id);
+        if (current && ["open", "closing"].includes(originalStatus)) {
+          await finalize(rt, current);
+        } else if (current && ["skipped", "failed"].includes(originalStatus)) {
+          await updateTrade(t.id, { status: originalStatus, pending_close_reason: null });
+        } else if (current && ["opening", "unknown"].includes(originalStatus)) {
+          const order = current.client_order_id
+            ? await rt.ex.queryOrder(current.symbol, { clientOrderId: current.client_order_id }, "entry")
+            : null;
+          if (order && ["NEW", "PARTIALLY_FILLED"].includes(order.status) && order.orderId) {
+            await rt.ex.cancelOrder(current.symbol, order.orderId, "entry");
+          }
+          if (order && order.executedQty > 0) {
+            await updateTrade(t.id, {
+              status: "closing",
+              qty: order.executedQty,
+              initial_qty: current.initial_qty ?? order.executedQty,
+              entry_price: current.entry_price ?? (order.avgPrice > 0 ? order.avgPrice : null),
+              opened_at: current.opened_at ?? current.entry_sent_at ?? new Date(order.time || now()),
+            });
+          } else if (!order || ["CANCELED", "CANCELLED", "REJECTED", "EXPIRED"].includes(order.status)) {
+            await updateTrade(t.id, { status: "skipped", reason: "source_cancelled", pending_close_reason: null });
+            await event(rt.acct.id, current, "skipped", { reason: "source_cancelled", sourceCancellation: true });
+          }
+        }
+      }
+      // unavailable remains pending; reconciliation retries against BingX.
+      // Command-sequence writes do not touch updated_at, which paces close retries.
+      await done();
+      return;
+    }
     // The bot manages this Nihilist trade itself: Nihilist's stop moves and closes are not followed,
     // except a close at the end of the holding time (the same limit as the bot's own).
     if (ownMgmt(t) && (cmd.type === "move_stop" || (cmd.type === "close" && cmd.reason !== "expired"))) { await done(); return; }
-    if (cmd.type === "position_review" && !reviewIsCancellation(cmd)) { await done(); return; } // only observed (event above)
-    if (cmd.type === "cancel_entry" || cmd.type === "position_review") {
-      // Owner 2026-11-09: a cancellation is booked as a cancellation (cancel:<reason>), never as an ordinary close.
-      const key = cancelKey(cmd.type === "position_review" ? norm(cmd.trackerStatus) || norm(cmd.sourceAction) : cmd.reason);
-      if (t.status === "opening" && !t.entry_sent_at) await skip(rt, t, "source_cancelled");
-      else if (t.status === "opening" || t.status === "unknown") await updateTrade(t.id, { pending_close_reason: key }); // closed as soon as the entry is found
-      else if (t.status !== "closing") await closeMarket(rt, t, key);
-    } else if (cmd.type === "move_stop" && cmd.stopPrice !== null) {
+    if (cmd.type === "move_stop" && cmd.stopPrice !== null) {
       if (t.status === "open") await replaceStop(rt, t, cmd.stopPrice, cmd.reason);
       else await updateTrade(t.id, { stop_price: cmd.stopPrice });
     } else if (cmd.type === "close" && (t.status === "unknown" || t.status === "opening")) {
@@ -565,6 +1024,8 @@ export function createExecutor(deps: {
     if (step.stop !== null) await replaceStop(rt, cur, step.stop, step.be && !t.be_moved && !(m.trail && peak >= m.trail.act) ? "breakeven" : "trailing");
   }
   const ownMgmt = (t: Trade) => Boolean(t.mgmt && t.mgmt !== "source");
+  /** A close the source asked for (its close or its cancellation) waits on this trade. */
+  const sourcePending = (r: string | null | undefined) => Boolean(r && (r.startsWith("source") || isCancelReason(r)));
   const missingAtSource = new Map<string, number>();
   const isBtc = (symbol: string) => /^BTC-?USDT$/.test(symbol);
 
@@ -583,7 +1044,7 @@ export function createExecutor(deps: {
     if (!missed.length) return false;
     missed.sort((a, b) => a.seq! - b.seq!);
     const lastMove = Math.max(...missed.filter((c) => c.type === "move_stop").map((c) => c.seq!), -1);
-    const terminal = missed.find((c) => c.type === "cancel_entry" || reviewIsCancellation(c) || (c.type === "close" && (c.fraction ?? 1) >= 0.999));
+    const terminal = missed.find((c) => isSourceCancellation(c) || (c.type === "close" && (c.fraction ?? 1) >= 0.999));
     const todo = terminal ? [terminal] : missed.filter((c) => c.type !== "move_stop" || c.seq === lastMove);
     const f = await factorOf(t);
     for (const c of todo) {
@@ -597,12 +1058,21 @@ export function createExecutor(deps: {
   }
 
   // ---------------- reconciliation ----------------
-  async function reconcile(rt: Runtime): Promise<void> {
+  async function reconcile(rt: Runtime): Promise<ReconcileIssue[] | null> {
     const trades = await activeTrades(rt.acct.id);
-    if (!trades.length) return;
+    if (!trades.length) {
+      const auditedAt = now();
+      if (auditedAt - (lastIdlePositionAudit.get(rt.acct.id) ?? 0) < IDLE_POSITION_AUDIT_MS) return null;
+      lastIdlePositionAudit.set(rt.acct.id, auditedAt);
+    }
     const all = await rt.ex.positions(undefined, "normal");
+    const currentTrades = await activeTrades(rt.acct.id);
+    const cleanupIssues = await cleanupPendingOrphanOrders(rt, all);
+    const untrackedIssues = await reportUntrackedPositions(rt, currentTrades, all);
+    if (!trades.length) return [...cleanupIssues, ...untrackedIssues];
     // One request for the open orders of every symbol in this pass (BingX limits openOrders: 100410).
     await rt.ex.prefetchOpenOrders(trades.map((t) => t.symbol)).catch(() => undefined);
+    const issues: ReconcileIssue[] = [...cleanupIssues, ...untrackedIssues];
     await Promise.all(trades.map((t) => withLock(rt, t.symbol, async () => {
       const cur = await tradeById(t.id);
       if (!cur || !["opening", "open", "closing", "unknown"].includes(cur.status)) return;
@@ -615,12 +1085,43 @@ export function createExecutor(deps: {
           await protect(rt, cur, true);
           const after = await tradeById(cur.id);
           // The source closed it while we did not know the entry: close now.
-          if (after?.status === "open" && (after.pending_close_reason?.startsWith("source") || isCancelReason(after.pending_close_reason))) await closeMarket(rt, after, after.pending_close_reason!);
+          if (after?.status === "open" && sourcePending(after.pending_close_reason)) await closeMarket(rt, after, after.pending_close_reason!);
           return;
         }
         if (age > 120_000 || cur.status === "opening") {
-          const order = cur.client_order_id ? await rt.ex.queryOrder(cur.symbol, { clientOrderId: cur.client_order_id }).catch(() => null) : null;
-          if (order && order.executedQty > 0) { await updateTrade(cur.id, { status: "closing", entry_price: order.avgPrice, qty: order.executedQty, initial_qty: order.executedQty, opened_at: new Date(order.time || now()) }); await finalize(rt, (await tradeById(cur.id))!); return; }
+          const sourceClosePending = sourcePending(cur.pending_close_reason);
+          const order = cur.client_order_id
+            ? sourceClosePending
+              ? await rt.ex.queryOrder(cur.symbol, { clientOrderId: cur.client_order_id })
+              : await rt.ex.queryOrder(cur.symbol, { clientOrderId: cur.client_order_id }).catch(() => null)
+            : null;
+          if (sourceClosePending && order && ["NEW", "PARTIALLY_FILLED"].includes(order.status) && order.orderId) {
+            await rt.ex.cancelOrder(cur.symbol, order.orderId);
+          }
+          if (order && order.executedQty > 0) {
+            const closing = await updateTrade(cur.id, {
+              status: "closing",
+              entry_price: cur.entry_price ?? (order.avgPrice > 0 ? order.avgPrice : null),
+              qty: order.executedQty,
+              initial_qty: cur.initial_qty ?? order.executedQty,
+              opened_at: cur.opened_at ?? new Date(order.time || now()),
+            });
+            if (sourceClosePending) {
+              const latePosition = await findPosition(rt, closing, "normal");
+              if (latePosition) await closeMarket(rt, closing, cur.pending_close_reason!);
+              else await finalize(rt, closing);
+            } else {
+              await finalize(rt, closing);
+            }
+            return;
+          }
+          if (sourceClosePending) {
+            if (!cur.client_order_id || !order || ["CANCELED", "CANCELLED", "REJECTED", "EXPIRED"].includes(order.status)) {
+              await updateTrade(cur.id, { status: "skipped", reason: "source_cancelled", pending_close_reason: null });
+              await event(rt.acct.id, cur, "skipped", { reason: "source_cancelled", sourceCancellation: true });
+            }
+            return;
+          }
           await fail(rt, cur, "entry_not_found");
         }
         return;
@@ -646,11 +1147,14 @@ export function createExecutor(deps: {
       if (cur.take_pct) await ensureTake(rt, cur, pos);
       if (ownMgmt(cur)) await manage(rt, (await tradeById(cur.id))!);
     }).catch(async (e) => {
+      const message = errText(e);
+      issues.push({ source: t.source, symbol: t.symbol, message });
       log("executor: reconcile trade failed", e);
       // Kept for the owner (a repeated error is stored once a minute at most).
       const last = await pool.query("SELECT 1 FROM ex_events WHERE trade_id = $1 AND kind = 'reconcile_error' AND created_at > now() - interval '1 minute'", [t.id]).catch(() => ({ rowCount: 1 }));
-      if (!last.rowCount) await event(rt.acct.id, t, "reconcile_error", { message: errText(e) }).catch(() => undefined);
+      if (!last.rowCount) await event(rt.acct.id, t, "reconcile_error", { message }).catch(() => undefined);
     })));
+    return issues;
   }
 
   // ---------------- public ----------------
@@ -687,16 +1191,29 @@ export function createExecutor(deps: {
       const trades = await activeTrades(rt.acct.id);
       for (const t of trades) {
         const s = map.get(t.source_signal_id);
-        if (!s || t.status !== "open" || ownMgmt(t)) continue;
+        if (!s) continue;
+        const actionKind = sourceActionKind(s.action, s.status);
+        if (actionKind === "review" || (ownMgmt(t) && actionKind !== "close")) continue;
         await withLock(rt, t.symbol, async () => {
           const cur = await tradeById(t.id);
-          if (!cur || cur.status !== "open") return;
+          if (!cur || !["opening", "open", "closing", "unknown"].includes(cur.status)) return;
+          // Owner 2026-11-09: a signal the source cancelled / reclassified, or that is gone at the source two syncs
+          // in a row, is closed as a cancellation found by the sync — not as an ordinary close.
+          const st = (s.status ?? "").toLowerCase();
+          const gone = actionKind === "unknown" && s.status == null && (missingAtSource.get(s.sourceSignalId) ?? 0) >= 2;
+          const cancelled = st === "cancelled" || st === "canceled" || st === "reclassified" || gone;
+          if (actionKind === "close" || gone) {
+            const key = cancelled ? cancelKey(gone ? "removed" : st, true) : "source_sync";
+            if (cur.status === "opening" || cur.status === "unknown") {
+              await updateTrade(cur.id, { pending_close_reason: cancelled ? key : "source:source_sync" });
+            } else if (cur.status === "open") {
+              await closeMarket(rt, cur, key);
+            }
+            return;
+          }
+          if (cur.status !== "open") return;
           const stop = s.stop === null ? null : s.stop * (await factorOf(cur));
-          if (s.action === "close") await closeMarket(rt, cur, "source_sync");
-          // Owner 2026-11-09: CAB sends cancelled / reclassified signals as "review" — the sync never closed them.
-          else if (s.status === "cancelled" || s.status === "reclassified") await closeMarket(rt, cur, cancelKey(s.status, true));
-          else if (s.action === "unknown" && s.status == null && (missingAtSource.get(s.sourceSignalId) ?? 0) >= 2) await closeMarket(rt, cur, cancelKey("removed", true));
-          else if (stop !== null && cur.stop_price !== null &&
+          if (stop !== null && cur.stop_price !== null &&
             (cur.side === "long" ? stop > cur.stop_price * 1.0005 : stop < cur.stop_price * 0.9995)) {
             await replaceStop(rt, cur, stop, "source_sync");
           }
@@ -705,12 +1222,66 @@ export function createExecutor(deps: {
     }
   }
 
+  async function sourceSyncIssues(rt: Runtime): Promise<ReconcileIssue[]> {
+    if (!deps.sourceSyncStatus) return [];
+    const activeStatuses = ["opening", "open", "closing", "unknown"];
+    const activeSources = rt.acct.id.startsWith("owner-")
+      ? await pool.query<{ source: string }>(
+        `SELECT DISTINCT source FROM ex_trades
+         WHERE account_id LIKE 'owner-%' AND status = ANY($1::text[]) ORDER BY source`,
+        [activeStatuses],
+      )
+      : await pool.query<{ source: string }>(
+        `SELECT DISTINCT source FROM ex_trades
+         WHERE account_id = $1 AND status = ANY($2::text[]) ORDER BY source`,
+        [rt.acct.id, activeStatuses],
+      );
+    const sources = activeSources.rows.map((row) => row.source);
+    const issues: ReconcileIssue[] = [];
+    for (const source of sources) {
+      const status = deps.sourceSyncStatus(source);
+      if (!sourceSyncConfirmed(status, now())) {
+        issues.push({
+          source,
+          message: status?.error
+            ? `Source state not confirmed (${source}): ${status.error}`
+            : `Source state not confirmed (${source})`,
+        });
+      }
+    }
+    return issues;
+  }
+
   /** Owner 2026-11-06: each account's result is returned, so Bot Health shows an account whose pass fails. */
   async function reconcileAll(): Promise<Array<{ id: string; label: string; ok: boolean; error: string | null }>> {
     const rts = await refreshAccounts().catch(() => [...runtimes.values()]);
-    return Promise.all(rts.map((rt) => reconcile(rt)
-      .then(() => ({ id: rt.acct.id, label: rt.acct.label, ok: true, error: null }))
-      .catch((e) => { log(`executor: reconcile ${rt.acct.id} failed`, e); return { id: rt.acct.id, label: rt.acct.label, ok: false, error: errText(e) }; })));
+    return Promise.all(rts.map(async (rt) => {
+      try {
+        const issues = await reconcile(rt);
+        if (issues === null) return { id: rt.acct.id, label: rt.acct.label, ok: true, error: null };
+        const sourceIssues = await sourceSyncIssues(rt);
+        const unsettledTrades = (await activeTrades(rt.acct.id))
+          .filter((trade) => trade.status !== "open")
+          .map((trade) => ({
+            source: trade.source,
+            symbol: trade.symbol,
+            message: `Trade settlement not confirmed: ${trade.symbol} (${trade.status})`,
+          }));
+        const allIssues = [...issues, ...sourceIssues, ...unsettledTrades];
+        if (allIssues.length) {
+          await reportReconcileIssues(rt, allIssues);
+          return { id: rt.acct.id, label: rt.acct.label, ok: false, error: allIssues[0]!.message };
+        }
+        await reportReconcileIssues(rt, []);
+        return { id: rt.acct.id, label: rt.acct.label, ok: true, error: null };
+      } catch (e) {
+        const message = errText(e);
+        resetOrphanObservations(rt.acct.id);
+        await reportReconcileIssues(rt, [{ message }]);
+        log(`executor: reconcile ${rt.acct.id} failed`, e);
+        return { id: rt.acct.id, label: rt.acct.label, ok: false, error: message };
+      }
+    }));
   }
 
   return { onSignal, onCommand, onSourceState, reconcileAll, refreshAccounts, runtimes };

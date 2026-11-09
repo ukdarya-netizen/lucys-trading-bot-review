@@ -18,6 +18,7 @@ import { closeReasonText, isCancelReason } from "./texts";
 import { createIntakeHandler } from "./intake";
 import { BTC_MAX_LEVERAGE, ensureExecutorTables, getBtcSettings, getSourceSettings, saveSourceSettings, type SourceSettings } from "./store";
 import { nihilistStrategies, nihilistStrategy } from "./plan";
+import { missingSourceSignals, sourceActionKind, type SourceSyncStatus } from "./source-state";
 import { pumpTelegram, telegramOutboxStatus, telegramSender } from "./telegram";
 
 export const executorEnabled = () => process.env.EXECUTOR_V2 === "1";
@@ -36,7 +37,7 @@ export function executorRequestHandler(req: IncomingMessage, res: ServerResponse
 }
 
 export type SourceState = { sourceSignalId: string; action: string; stop: number | null; status?: string | null; cancelReason?: string | null };
-type SyncSource = "cab" | "nihilist";
+export type SyncSource = "cab" | "nihilist";
 
 /** Where each source's position sync lives and its token. Nihilist's address: NIHILIST_POSITION_SYNC_URL. */
 /** CAB's address (from its position sync URL), for its strategy report. */
@@ -79,9 +80,13 @@ export async function readSourceSync(source: SyncSource, afterId = 0, fetchImpl:
         stop = Number.isFinite(v) && v > 0 ? v : null;
       }
       // The source's own status (CAB: cancelled / reclassified come as action "review").
-      const status = typeof p.sourceStatus === "string" ? p.sourceStatus : null;
-      out.push({ sourceSignalId: String(p.sourceSignalId), action: String(p.sourceAction), stop, status,
-        cancelReason: typeof p.sourceCancelReason === "string" ? p.sourceCancelReason : null });
+      out.push({
+        sourceSignalId: String(p.sourceSignalId),
+        action: String(p.sourceAction),
+        ...(typeof p.sourceStatus === "string" ? { status: p.sourceStatus } : {}),
+        ...(typeof p.sourceCancelReason === "string" ? { cancelReason: p.sourceCancelReason } : {}),
+        stop,
+      });
     }
     after = body.nextAfterId ?? null;
   }
@@ -89,16 +94,65 @@ export async function readSourceSync(source: SyncSource, afterId = 0, fetchImpl:
 }
 
 const SIGNAL_NUM = /-(\d+)$/;
-async function syncSource(ex: Executor, source: SyncSource): Promise<number> {
-  // Only while there is an open trade of this source; start just before the oldest one.
-  const r = await pool.query<{ source_signal_id: string }>(
-    "SELECT source_signal_id FROM ex_trades WHERE source = $1 AND status IN ('open', 'closing') ORDER BY id", [source]);
-  if (!r.rowCount) return 0;
-  const nums = r.rows.map((x) => Number(SIGNAL_NUM.exec(x.source_signal_id)?.[1])).filter((n) => Number.isSafeInteger(n) && n > 0);
-  const after = nums.length ? Math.max(0, Math.min(...nums) - 1) : 0;
-  const states = await readSourceSync(source, after);
-  await ex.onSourceState(states);
-  return states.length;
+export async function syncSource(
+  ex: Executor,
+  source: SyncSource,
+  options: {
+    read?: typeof readSourceSync;
+    status?: Record<SyncSource, SourceSyncStatus>;
+    now?: () => number;
+  } = {},
+): Promise<number> {
+  const read = options.read ?? readSourceSync;
+  const status = options.status ?? syncState as Record<SyncSource, SourceSyncStatus>;
+  const now = options.now ?? Date.now;
+  status[source] = { at: now(), ok: false, error: "source position sync in progress" };
+  try {
+    // Only while there is an active trade of this source; start just before the oldest one.
+    const r = await pool.query<{ source_signal_id: string }>(
+      "SELECT source_signal_id FROM ex_trades WHERE source = $1 AND status IN ('opening', 'open', 'closing', 'unknown') ORDER BY id", [source]);
+    if (!r.rowCount) {
+      status[source] = { at: now(), ok: true, error: null };
+      return 0;
+    }
+    const nums = r.rows.map((x) => Number(SIGNAL_NUM.exec(x.source_signal_id)?.[1])).filter((n) => Number.isSafeInteger(n) && n > 0);
+    const after = nums.length ? Math.max(0, Math.min(...nums) - 1) : 0;
+    const states = await read(source, after);
+    await ex.onSourceState(states);
+    const missing = missingSourceSignals(r.rows.map((row) => row.source_signal_id), states.map((state) => state.sourceSignalId));
+    if (missing.length) throw new Error(`${source} position sync omitted ${missing.length} active signal(s)`);
+    if (states.some((state) => sourceActionKind(state.action, state.status) === "review")) {
+      throw new Error(`${source} has a cancellation/reclassification requiring review`);
+    }
+    if (states.some((state) => sourceActionKind(state.action, state.status) === "unknown")) {
+      throw new Error(`${source} position sync returned an unrecognized action`);
+    }
+    const cancelledIds = states
+      .filter((state) => sourceActionKind(state.action, state.status) === "close")
+      .map((state) => state.sourceSignalId);
+    if (cancelledIds.length) {
+      const unresolved = await pool.query<{ source_signal_id: string; status: string }>(
+        `SELECT source_signal_id, status FROM ex_trades
+         WHERE source = $1 AND source_signal_id = ANY($2::text[])
+           AND status IN ('opening', 'open', 'closing', 'unknown')
+         ORDER BY id`,
+        [source, cancelledIds],
+      );
+      if (unresolved.rowCount) {
+        const ids = [...new Set(unresolved.rows.map((row) => row.source_signal_id))].join(", ");
+        throw new Error(`${source} cancellation remains unresolved for ${ids}`);
+      }
+    }
+    status[source] = { at: now(), ok: true, error: null };
+    return states.length;
+  } catch (e) {
+    status[source] = {
+      at: now(),
+      ok: false,
+      error: e instanceof Error ? e.message.slice(0, 160) : String(e).slice(0, 160),
+    };
+    throw e;
+  }
 }
 
 export async function startExecutor(log: (msg: string, extra?: unknown) => void): Promise<void> {
@@ -111,6 +165,7 @@ export async function startExecutor(log: (msg: string, extra?: unknown) => void)
       ? createBingX({ env: "vst", key: a.key, secret: a.secret, host: "https://paper.local", fetchImpl: (paperFetch ??= createPaperFetch()) })
       : createBingX({ env: a.env, key: a.key, secret: a.secret })),
     send: telegramSender,
+    sourceSyncStatus: (source) => syncState[source],
     log,
   });
   handler = createIntakeHandler(executor, { log });
@@ -141,9 +196,7 @@ export async function startExecutor(log: (msg: string, extra?: unknown) => void)
   setInterval(() => {
     for (const source of ["cab", "nihilist"] as const) {
       void syncSource(ex, source)
-        .then(() => { lastSync[source] = { at: Date.now(), ok: true, error: null }; })
         .catch((e) => {
-          lastSync[source] = { at: Date.now(), ok: false, error: e instanceof Error ? e.message.slice(0, 160) : String(e) };
           log(`executor: ${source} sync failed`, e);
         });
     }

@@ -205,6 +205,14 @@ export async function updateTrade(id: number, patch: Partial<Trade>): Promise<Tr
   return r.rows[0]!;
 }
 
+export async function updateTradeCommandSequence(id: number, seq: number): Promise<Trade> {
+  const r = await pool.query<Trade>(
+    "UPDATE ex_trades SET last_command_seq = GREATEST(last_command_seq, $2) WHERE id = $1 RETURNING *",
+    [id, seq],
+  );
+  return r.rows[0]!;
+}
+
 export async function tradeById(id: number): Promise<Trade | null> {
   const r = await pool.query<Trade>("SELECT * FROM ex_trades WHERE id = $1", [id]);
   return r.rows[0] ?? null;

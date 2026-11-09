@@ -380,6 +380,7 @@ export async function startBotWorker() {
           ? (info) => {
             if (info.reason === "vst_read_incident") {
               process.stderr.write(`Bullet VST read incident: ${JSON.stringify(info)}\n`);
+             return;
             }
             return blockedAlerter.send(info).catch((error) => {
               process.stderr.write(`Bullet VST blocked-alert failed: ${safeTickErrorSummary(error)}\n`);

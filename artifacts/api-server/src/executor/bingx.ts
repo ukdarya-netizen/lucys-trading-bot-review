@@ -27,6 +27,7 @@ export const HOSTS: Record<Env, string> = {
 };
 const MIN_GAP_MS = 120;
 const TIMEOUT_MS = 8_000;
+const CLOCK_SYNC_MAX_RTT_MS = 2_000;
 
 export class BingXError extends Error {
   constructor(message: string, public code: number | null, public kind: "exchange" | "network" | "timeout" | "http" | "rate") {
@@ -128,6 +129,9 @@ export function createBingX(opts: { env: Env; key: string; secret: string; fetch
   const now = opts.now ?? Date.now;
   const marginAsset = opts.env === "vst" ? "VST" : "USDT";
   const limiter = limiterFor(opts.key, !opts.fetchImpl);
+  const canSyncClock = !opts.fetchImpl && !opts.host;
+  let clockOffsetMs = 0;
+  let clockSyncInFlight: Promise<void> | null = null;
 
   // ---- per-account queue: entries first ----
   const queue = limiter.queue;
@@ -162,7 +166,7 @@ export function createBingX(opts: { env: Env; key: string; secret: string; fetch
     let url: string;
     const headers: Record<string, string> = {};
     if (signed) {
-      values.timestamp = String(now());
+      values.timestamp = String(Math.round(now() + clockOffsetMs));
       values.recvWindow = "5000";
       const sorted = Object.entries(values).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
       const signingText = sorted.map(([k, v]) => `${k}=${v}`).join("&");
@@ -182,13 +186,19 @@ export function createBingX(opts: { env: Env; key: string; secret: string; fetch
     }
     const text = await res.text().catch(() => "");
     let body: any;
-    try { body = parseLossless(text); } catch { throw new BingXError(`${method} ${path}: HTTP ${res.status}`, null, res.status >= 500 ? "network" : "http"); }
+    try { body = parseLossless(text); } catch {
+      const diagnostic = path === "/openApi/swap/v2/quote/contracts"
+        ? `; type=${(res.headers.get("content-type") ?? "unknown").replace(/[\r\n]/g, " ").slice(0, 40)}; chars=${text.length}; preview=${JSON.stringify(text.replace(/[\u0000-\u001f\u007f]/g, " ").replace(/\s+/g, " ").trim().slice(0, 48))}`
+        : "";
+      throw new BingXError(`${method} ${path}: invalid JSON HTTP ${res.status}${diagnostic}`, null, res.status >= 500 ? "network" : "http");
+    }
     if (body?.code !== 0) {
       const code = Number(body?.code ?? -1);
       const msg = String(body?.msg ?? "");
-      if (code === 100410 || code === 100429 || res.status === 429) {
-        const until = Number(/unblocked after (\d{13})/.exec(msg)?.[1]);
-        blockedUntil.set(path, Number.isFinite(until) && until > Date.now() ? until : Date.now() + 2_000);
+      if (code === 100410 || code === 100429 || code === 109429 || res.status === 429) {
+        const until = Number(/(?:unblocked after|(?:can\s+)?retry after time:)\s*(\d{13})/i.exec(msg)?.[1]);
+        const fallbackMs = code === 109429 ? 480_000 : 2_000;
+        blockedUntil.set(path, Number.isFinite(until) && until > Date.now() ? until : Date.now() + fallbackMs);
         const hits = health.rateHits.get(path) ?? [];
         hits.push(Date.now());
         health.rateHits.set(path, hits.filter((t) => t > Date.now() - 3_600_000));
@@ -198,6 +208,43 @@ export function createBingX(opts: { env: Env; key: string; secret: string; fetch
       throw new BingXError(`${method} ${path}: ${body?.code} ${msg}`.trim(), code, "exchange");
     }
     return body.data;
+  }
+  async function syncClock(): Promise<void> {
+    if (!canSyncClock) throw new BingXError("Server-time sync is unavailable for this custom client", 109400, "exchange");
+    if (clockSyncInFlight) return clockSyncInFlight;
+    const sync = (async () => {
+      const sentAt = now();
+      let res: Response;
+      try {
+        res = await doFetch(`${host}/openApi/swap/v2/server/time`, { method: "GET", signal: AbortSignal.timeout(TIMEOUT_MS) });
+      } catch (err) {
+        const timeout = err instanceof Error && (err.name === "TimeoutError" || err.name === "AbortError");
+        throw new BingXError(`GET /openApi/swap/v2/server/time: ${timeout ? "timeout" : "network error"}`, null, timeout ? "timeout" : "network");
+      }
+      const receivedAt = now();
+      const roundTrip = receivedAt - sentAt;
+      if (roundTrip < 0 || roundTrip > CLOCK_SYNC_MAX_RTT_MS) {
+        throw new BingXError(`GET /openApi/swap/v2/server/time: round trip ${roundTrip}ms is too slow to sync safely`, null, "timeout");
+      }
+      const text = await res.text().catch(() => "");
+      let body: any;
+      try { body = parseLossless(text); } catch {
+        throw new BingXError(`GET /openApi/swap/v2/server/time: HTTP ${res.status}`, null, res.status >= 500 ? "network" : "http");
+      }
+      const code = Number(body?.code ?? -1);
+      const serverTime = Number(body?.data?.serverTime);
+      if (!res.ok || code !== 0 || !Number.isFinite(serverTime) || serverTime <= 0) {
+        const message = String(body?.msg ?? `HTTP ${res.status}`);
+        throw new BingXError(`GET /openApi/swap/v2/server/time: ${code} ${message}`.trim(), Number.isFinite(code) ? code : null, res.status >= 500 ? "network" : "exchange");
+      }
+      clockOffsetMs = serverTime - (sentAt + receivedAt) / 2;
+    })();
+    clockSyncInFlight = sync;
+    try {
+      await sync;
+    } finally {
+      if (clockSyncInFlight === sync) clockSyncInFlight = null;
+    }
   }
   const blockedUntil = limiter.blockedUntil;
   // For Bot Health: requests, rate-limit hits per endpoint (times of the last hour), last refusal.
@@ -221,6 +268,7 @@ export function createBingX(opts: { env: Env; key: string; secret: string; fetch
     // A burst of signals: many requests wait for the same unblock moment and may hit the limit
     // again together — retried until it passes (with a small random spread), up to RATE_TOTAL_MS.
     const started = Date.now();
+    let timestampRetries = 0;
     for (let attempt = 0; ; attempt++) {
       await waitUnblocked(path, attempt);
       try {
@@ -233,6 +281,11 @@ export function createBingX(opts: { env: Env; key: string; secret: string; fetch
           return raw(method, path, params, signed);
         });
       } catch (e) {
+        if (signed && canSyncClock && e instanceof BingXError && e.code === 109400 && timestampRetries === 0) {
+          timestampRetries += 1;
+          await syncClock();
+          continue;
+        }
         if (!(e instanceof BingXError && e.kind === "rate")) throw e;
         const ms = (blockedUntil.get(path) ?? 0) - Date.now();
         if (ms > RATE_RETRY_MAX_MS || Date.now() - started > RATE_TOTAL_MS || attempt >= 8) throw e;

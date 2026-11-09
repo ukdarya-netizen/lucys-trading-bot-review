@@ -42,46 +42,63 @@ let timer: NodeJS.Timeout | null = null;
 export async function pumpTelegram(post: Post = telegramPost, sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))): Promise<void> {
   if (pumping) { again = true; return; }
   pumping = true;
+  let pumpLockState: "held" | "busy" | "no-token" = "no-token";
   try {
-    do {
-      again = false;
-      const token = TOKEN();
-      if (!token) return;
-      for (;;) {
-        const r = await pool.query<{ id: number; chat_id: string; text: string; attempts: number }>(
-          `SELECT id, chat_id, text, attempts FROM ex_tg_outbox
-           WHERE sent_at IS NULL AND failed_at IS NULL AND next_at <= now() ORDER BY id LIMIT 1`);
-        const m = r.rows[0];
-        if (!m) break;
-        let out: Awaited<ReturnType<Post>>;
-        try { out = await post(token, m.chat_id, m.text); } catch (e) {
-          out = { ok: false, status: 0, retryAfterS: null, description: `сеть: ${e instanceof Error ? e.message : String(e)}`.slice(0, 300) };
+    const token = TOKEN();
+    if (!token) return;
+    pumpLockState = "busy";
+    const client = await pool.connect();
+    try {
+      const lock = await client.query<{ locked: boolean }>(
+        "SELECT pg_try_advisory_lock(hashtextextended($1, 0)) AS locked",
+        ["executor-telegram-outbox-pump"],
+      );
+      pumpLockState = lock.rows[0]?.locked === true ? "held" : "busy";
+      if (pumpLockState !== "held") return;
+      do {
+        again = false;
+        for (;;) {
+          const r = await client.query<{ id: number; chat_id: string; text: string; attempts: number }>(
+            `SELECT id, chat_id, text, attempts FROM ex_tg_outbox
+             WHERE sent_at IS NULL AND failed_at IS NULL AND next_at <= now() ORDER BY id LIMIT 1`);
+          const m = r.rows[0];
+          if (!m) break;
+          let out: Awaited<ReturnType<Post>>;
+          try { out = await post(token, m.chat_id, m.text); } catch (e) {
+            out = { ok: false, status: 0, retryAfterS: null, description: `сеть: ${e instanceof Error ? e.message : String(e)}`.slice(0, 300) };
+          }
+          if (out.ok) {
+            await client.query("UPDATE ex_tg_outbox SET sent_at = now(), attempts = attempts + 1 WHERE id = $1", [m.id]);
+          } else if (out.status === 429 || out.status === 0 || out.status >= 500) {
+            // Rate limit or a passing failure: wait and keep the order (later messages wait too).
+            const waitMs = out.retryAfterS !== null ? (out.retryAfterS + 1) * 1000 : Math.min(60_000, 2_000 * 2 ** Math.min(m.attempts, 5));
+            await client.query("UPDATE ex_tg_outbox SET attempts = attempts + 1, last_error = $2, next_at = now() + make_interval(secs => $3) WHERE id = $1",
+              [m.id, out.description, waitMs / 1000]);
+            break;
+          } else {
+            const final = m.attempts + 1 >= MAX_REFUSALS;
+            await client.query(
+              `UPDATE ex_tg_outbox SET attempts = attempts + 1, last_error = $2,
+                 next_at = now() + interval '30 seconds', failed_at = CASE WHEN $3 THEN now() ELSE NULL END WHERE id = $1`,
+              [m.id, out.description, final]);
+          }
+          await sleep(TELEGRAM_GAP_MS);
         }
-        if (out.ok) {
-          await pool.query("UPDATE ex_tg_outbox SET sent_at = now(), attempts = attempts + 1 WHERE id = $1", [m.id]);
-        } else if (out.status === 429 || out.status === 0 || out.status >= 500) {
-          // Rate limit or a passing failure: wait and keep the order (later messages wait too).
-          const waitMs = out.retryAfterS !== null ? (out.retryAfterS + 1) * 1000 : Math.min(60_000, 2_000 * 2 ** Math.min(m.attempts, 5));
-          await pool.query("UPDATE ex_tg_outbox SET attempts = attempts + 1, last_error = $2, next_at = now() + make_interval(secs => $3) WHERE id = $1",
-            [m.id, out.description, waitMs / 1000]);
-          break;
-        } else {
-          const final = m.attempts + 1 >= MAX_REFUSALS;
-          await pool.query(
-            `UPDATE ex_tg_outbox SET attempts = attempts + 1, last_error = $2,
-               next_at = now() + interval '30 seconds', failed_at = CASE WHEN $3 THEN now() ELSE NULL END WHERE id = $1`,
-            [m.id, out.description, final]);
-        }
-        await sleep(TELEGRAM_GAP_MS);
+      } while (again);
+    } finally {
+      if (pumpLockState === "held") {
+        await client.query("SELECT pg_advisory_unlock(hashtextextended($1, 0))", ["executor-telegram-outbox-pump"]).catch(() => undefined);
       }
-    } while (again);
+      client.release();
+    }
   } finally {
     pumping = false;
     // Wake up for the next message that waits (rate limit, backoff).
     const next = await pool.query<{ ms: number }>(
       "SELECT GREATEST(0, EXTRACT(EPOCH FROM (min(next_at) - now())) * 1000)::float8 AS ms FROM ex_tg_outbox WHERE sent_at IS NULL AND failed_at IS NULL",
     ).catch(() => ({ rows: [] as Array<{ ms: number }> }));
-    const ms = next.rows[0]?.ms;
+    const nextMs = next.rows[0]?.ms;
+    const ms = pumpLockState === "held" ? nextMs : pumpLockState === "busy" ? TELEGRAM_GAP_MS : null;
     if (timer) clearTimeout(timer);
     timer = ms === null || ms === undefined ? null : setTimeout(() => void pumpTelegram().catch(() => undefined), Math.max(200, ms));
     timer?.unref?.();
