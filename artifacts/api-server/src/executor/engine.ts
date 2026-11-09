@@ -41,9 +41,17 @@ export type SignalIn = {
   maxHoldH?: number | null;
 };
 export type CommandIn = {
-  commandId: string; sourceSignalId: string; symbol: string; type: "close" | "move_stop" | "cancel_entry";
+  commandId: string; sourceSignalId: string; symbol: string; type: "close" | "move_stop" | "cancel_entry" | "position_review";
   seq: number | null; at: number; reason: string; stopPrice: number | null; fraction: number | null;
+  /** position_review (source's view of a position): its action / tracker status. */
+  sourceAction?: string | null; trackerStatus?: string | null;
 };
+
+/** Owner 2026-11-09: a review that says the source cancelled or reclassified the signal is a cancellation. */
+const REVIEW_CANCEL = new Set(["cancel", "cancelled", "canceled", "cancel_entry", "smart_cancel", "reclassified"]);
+const norm = (v: string | null | undefined) => (v ?? "").trim().toLowerCase().replace(/[\s-]+/g, "_");
+export const reviewIsCancellation = (cmd: CommandIn) =>
+  cmd.type === "position_review" && (REVIEW_CANCEL.has(norm(cmd.sourceAction)) || REVIEW_CANCEL.has(norm(cmd.trackerStatus)));
 
 type Runtime = { acct: Account; ex: BingX; locks: Map<string, Promise<unknown>>; hedge?: boolean };
 
@@ -511,9 +519,10 @@ export function createExecutor(deps: {
     // The bot manages this Nihilist trade itself: Nihilist's stop moves and closes are not followed,
     // except a close at the end of the holding time (the same limit as the bot's own).
     if (ownMgmt(t) && (cmd.type === "move_stop" || (cmd.type === "close" && cmd.reason !== "expired"))) { await done(); return; }
-    if (cmd.type === "cancel_entry") {
+    if (cmd.type === "position_review" && !reviewIsCancellation(cmd)) { await done(); return; } // only observed (event above)
+    if (cmd.type === "cancel_entry" || cmd.type === "position_review") {
       // Owner 2026-11-09: a cancellation is booked as a cancellation (cancel:<reason>), never as an ordinary close.
-      const key = cancelKey(cmd.reason);
+      const key = cancelKey(cmd.type === "position_review" ? norm(cmd.trackerStatus) || norm(cmd.sourceAction) : cmd.reason);
       if (t.status === "opening" && !t.entry_sent_at) await skip(rt, t, "source_cancelled");
       else if (t.status === "opening" || t.status === "unknown") await updateTrade(t.id, { pending_close_reason: key }); // closed as soon as the entry is found
       else if (t.status !== "closing") await closeMarket(rt, t, key);
@@ -574,7 +583,7 @@ export function createExecutor(deps: {
     if (!missed.length) return false;
     missed.sort((a, b) => a.seq! - b.seq!);
     const lastMove = Math.max(...missed.filter((c) => c.type === "move_stop").map((c) => c.seq!), -1);
-    const terminal = missed.find((c) => c.type === "cancel_entry" || (c.type === "close" && (c.fraction ?? 1) >= 0.999));
+    const terminal = missed.find((c) => c.type === "cancel_entry" || reviewIsCancellation(c) || (c.type === "close" && (c.fraction ?? 1) >= 0.999));
     const todo = terminal ? [terminal] : missed.filter((c) => c.type !== "move_stop" || c.seq === lastMove);
     const f = await factorOf(t);
     for (const c of todo) {

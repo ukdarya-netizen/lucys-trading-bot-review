@@ -14,7 +14,7 @@ import { parseCommand, parseSignal } from "./intake";
 import { resolveStrategy, topUpAmount } from "./plan";
 import { ensureExecutorTables } from "./store";
 
-const fake = createFakeBingX({ equity: 10_000, prices: { "BIRB-USDT": 100, "IDOL-USDT": 2, "BTC-USDT": 60000, "ZZZ-USDT": 100, "YYY-USDT": 100, "AAA-USDT": 100, "CCC-USDT": 100, "MOG-USDT": 0.0000005, "CNA-USDT": 100, "CNB-USDT": 100, "CNC-USDT": 100, "CND-USDT": 100, "MRG-USDT": 100 } });
+const fake = createFakeBingX({ equity: 10_000, prices: { "BIRB-USDT": 100, "IDOL-USDT": 2, "BTC-USDT": 60000, "ZZZ-USDT": 100, "YYY-USDT": 100, "AAA-USDT": 100, "CCC-USDT": 100, "MOG-USDT": 0.0000005, "CNA-USDT": 100, "CNB-USDT": 100, "CNC-USDT": 100, "CND-USDT": 100, "MRG-USDT": 100, "PRV-USDT": 100, "PRW-USDT": 100 } });
 let host = "";
 const sent: string[] = [];
 let strategy = resolveStrategy({ strategy: "take5" });
@@ -566,4 +566,16 @@ test("the position opened but BingX refuses the margin top-up: the position is c
   assert.ok(sent.some((m) => m.includes("BingX не принял доливку маржи")));
   assert.equal(fake.positions.filter((p) => p.symbol === "MRG-USDT" && p.qty > 0).length, 0);
   fake.rejectMargin(0);
+});
+
+test("position_review: cancelled / reclassified closes as a cancellation; a plain review only observes", async () => {
+  fake.setPrice("PRV-USDT", 100); fake.setPrice("PRW-USDT", 100);
+  await ex.onSignal(sig(311, "PRVUSDT", 91, Date.now(), 100));
+  await ex.onSignal(sig(312, "PRWUSDT", 91, Date.now(), 100));
+  const review = (n: number, symbol: string, trackerStatus: string) => parseCommand({ commandId: `rv-${n}`, sourceSignalId: `cab-signal-${n}`, symbol,
+    type: "position_review", eventSeq: 1, eventAt: new Date().toISOString(), reason: "review", trackerStatus }, Date.now());
+  const a = review(311, "PRVUSDT", "reclassified"); assert.ok(a.ok); await ex.onCommand(a.value);
+  const b = review(312, "PRWUSDT", "active"); assert.ok(b.ok); await ex.onCommand(b.value);
+  assert.equal((await trade(311)).close_reason, "cancel:reclassified");
+  assert.equal((await trade(312)).status, "open");
 });

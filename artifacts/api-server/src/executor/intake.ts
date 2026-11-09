@@ -70,7 +70,7 @@ export function parseCommand(b: any, now: number): Parsed<CommandIn> {
   if (!/^[A-Za-z0-9_-]{1,100}$/.test(commandId)) return { ok: false, code: "invalid_commandId" };
   if (!/^(cab|nh)-signal-[1-9]\d*$/.test(sourceSignalId)) return { ok: false, code: "invalid_sourceSignalId" };
   const type = String(b.type ?? "");
-  if (type !== "close" && type !== "move_stop" && type !== "cancel_entry") return { ok: false, code: "invalid_type" };
+  if (type !== "close" && type !== "move_stop" && type !== "cancel_entry" && type !== "position_review") return { ok: false, code: "invalid_type" };
   const seqRaw = b.sequence ?? b.eventSeq;
   const seq = seqRaw === undefined || seqRaw === null ? null : Number(seqRaw);
   if (seq !== null && !(Number.isSafeInteger(seq) && seq >= 1)) return { ok: false, code: "invalid_sequence" };
@@ -84,6 +84,8 @@ export function parseCommand(b: any, now: number): Parsed<CommandIn> {
     value: {
       commandId, sourceSignalId, symbol: String(b.symbol ?? "").toUpperCase().replace("-", ""), type, seq,
       at: Number.isFinite(atRaw) ? atRaw : now, reason: String(b.reason ?? type), stopPrice, fraction: b.partial === true || (f !== null && f < 1) ? f : null,
+      sourceAction: typeof b.sourceAction === "string" ? b.sourceAction.slice(0, 40) : typeof b.action === "string" ? b.action.slice(0, 40) : null,
+      trackerStatus: typeof b.trackerStatus === "string" ? b.trackerStatus.slice(0, 40) : typeof b.sourceStatus === "string" ? b.sourceStatus.slice(0, 40) : null,
     },
   };
 }
