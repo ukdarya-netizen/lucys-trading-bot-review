@@ -21,6 +21,43 @@ function date(value: string | null) {
   return value ? new Date(value).toLocaleString("ru-RU", { timeZone: "Europe/Samara", day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" }) : "—";
 }
 
+/** "YYYY-MM-DD" of a moment in Samara time (the date input works in days). */
+function dayOf(value: Date) {
+  const p = new Intl.DateTimeFormat("en-CA", { timeZone: "Europe/Samara", year: "numeric", month: "2-digit", day: "2-digit" }).formatToParts(value)
+    .reduce<Record<string, string>>((r, x) => { if (x.type !== "literal") r[x.type] = x.value; return r; }, {});
+  return `${p.year}-${p.month}-${p.day}`;
+}
+function plusMonths(from: Date, n: number) { const d = new Date(from); d.setMonth(d.getMonth() + n); return d; }
+
+/**
+ * Owner 2026-11-09 (as CAB): approval for a term — 1 / 3 / 6 months or any date on the calendar
+ * (it opens on a click). The access ends at the end of the chosen day, Samara time.
+ */
+function TermPicker({ row, label, busy, onPick }: { row: Row; label: string; busy: boolean; onPick: (until: string) => void }) {
+  const now = new Date();
+  const left = row.status === "approved" && row.subscribedUntil && new Date(row.subscribedUntil) > now ? new Date(row.subscribedUntil) : now;
+  const [day, setDay] = useState(dayOf(plusMonths(left, 1)));
+  const min = dayOf(new Date(now.getTime() + 86_400_000));
+  return (
+    <div className="flex flex-wrap items-center gap-2">
+      {[1, 3, 6].map((m) => (
+        <button key={m} type="button" onClick={() => setDay(dayOf(plusMonths(left, m)))}
+          className={`h-9 border px-3 text-xs font-bold ${day === dayOf(plusMonths(left, m)) ? "border-success/60 bg-success/10 text-success" : "border-border"}`}>
+          {row.status === "approved" && left > now ? `+${m} мес` : `${m} мес`}
+        </button>
+      ))}
+      <input type="date" value={day} min={min} aria-label="Дата окончания подписки"
+        onClick={(e) => { try { (e.currentTarget as HTMLInputElement & { showPicker?: () => void }).showPicker?.(); } catch { /* the browser opens it itself */ } }}
+        onChange={(e) => e.target.value && setDay(e.target.value)}
+        className="h-9 cursor-pointer border border-border bg-transparent px-2 font-mono text-xs" />
+      <button type="button" disabled={busy || !day || day < min} onClick={() => onPick(day)}
+        className="flex h-9 items-center gap-2 bg-success px-3 text-xs font-bold text-success-foreground disabled:opacity-50">
+        <Check className="h-3.5 w-3.5" />{label} до {new Date(`${day}T12:00:00+04:00`).toLocaleDateString("ru-RU", { day: "numeric", month: "long", year: "numeric" })}
+      </button>
+    </div>
+  );
+}
+
 function normalizedSources(sources: string[] | null | undefined): BotSource[] {
   return (["cab", "nihilist"] as const).filter((source) => (sources ?? ["cab"]).includes(source));
 }
@@ -61,8 +98,8 @@ export default function JournalSubscribers() {
     onSettled: () => void queryClient.invalidateQueries({ queryKey: ["owner-subscribers"] }),
   });
   const decide = useMutation({
-    mutationFn: ({ id, decision }: { id: number; decision: string }) =>
-      api(`/journal/subscribers/${id}/decision`, { method: "POST", body: { decision } }),
+    mutationFn: ({ id, decision, until }: { id: number; decision: string; until?: string }) =>
+      api(`/journal/subscribers/${id}/decision`, { method: "POST", body: until ? { decision, until } : { decision } }),
     onSettled: () => void queryClient.invalidateQueries({ queryKey: ["owner-subscribers"] }),
   });
   const real = useMutation({
@@ -70,14 +107,14 @@ export default function JournalSubscribers() {
       api(`/journal/subscribers/${id}/real`, { method: "POST", body: { allowed } }),
     onSettled: () => void queryClient.invalidateQueries({ queryKey: ["owner-subscribers"] }),
   });
-  const approveWithSources = async (row: Row) => {
+  const approveWithSources = async (row: Row, until: string) => {
     const sources = selectedSources(row);
     if (!sources.length) return;
     try {
       if (!sameSources(sources, currentSources(row))) {
         await saveSources.mutateAsync({ id: row.id, sources });
       }
-      await decide.mutateAsync({ id: row.id, decision: "approve" });
+      await decide.mutateAsync({ id: row.id, decision: "approve", until });
     } catch {
       // The mutation errors are shown below the page heading.
     }
@@ -173,22 +210,23 @@ export default function JournalSubscribers() {
           </fieldset>
         )}
         <p className="mt-1 text-xs text-muted-foreground">
-          {row.status === "approved" && (row.subscriptionEnded
+          {row.isOwner && <span className="font-bold text-success">Владелец · доступ бессрочный · </span>}
+          {row.status === "approved" && !row.isOwner && (row.subscriptionEnded
             ? <span className="font-bold text-destructive">Подписка закончилась {date(row.subscribedUntil)} — торговля остановлена · </span>
             : <span>Подписка до {row.subscribedUntil ? date(row.subscribedUntil) : "без даты окончания"} · </span>)}
           {row.telegramChatId ? `Telegram ${row.telegramUsername ? `@${row.telegramUsername}` : row.telegramChatId}` : <span className="text-amber-300">Telegram не привязан — сообщения о подписке ему не придут</span>}
         </p>
         <div className="mt-3 flex flex-wrap gap-2">
           {row.status === "pending" && <>
-            <button type="button" disabled={decide.isPending || saveSources.isPending || selected.length === 0}
-              onClick={() => void approveWithSources(row)}
-              className="flex h-10 items-center gap-2 bg-success px-4 text-sm font-bold text-success-foreground"><Check className="h-4 w-4" />Одобрить</button>
+            {selected.length === 0
+              ? <p className="text-xs text-destructive">Выберите хотя бы один бот, чтобы одобрить.</p>
+              : <TermPicker row={row} label="Одобрить" busy={decide.isPending || saveSources.isPending} onPick={(until) => void approveWithSources(row, until)} />}
             <button type="button" onClick={() => decide.mutate({ id: row.id, decision: "reject" })}
-              className="flex h-10 items-center gap-2 border border-border px-4 text-sm"><X className="h-4 w-4" />Отклонить</button>
+              className="flex h-9 items-center gap-2 border border-border px-3 text-xs"><X className="h-3.5 w-3.5" />Отклонить</button>
           </>}
-          {row.status === "approved" && (
-            <button type="button" onClick={() => decide.mutate({ id: row.id, decision: "extend" })}
-              className="flex h-9 items-center gap-2 border border-success/50 px-3 text-xs font-bold text-success"><Check className="h-3.5 w-3.5" />Продлить на месяц</button>
+          {row.status === "approved" && !row.isOwner && (
+            <TermPicker row={row} label="Продлить" busy={decide.isPending}
+              onPick={(until) => decide.mutate({ id: row.id, decision: "approve", until })} />
           )}
           {row.status === "approved" && (
             <button type="button" onClick={() => real.mutate({ id: row.id, allowed: !row.realAllowed })}
@@ -196,13 +234,12 @@ export default function JournalSubscribers() {
               {row.realAllowed ? "Закрыть реальный счёт" : "Разрешить реальный счёт"}
             </button>
           )}
-          {row.status === "approved" && (
+          {row.status === "approved" && !row.isOwner && (
             <button type="button" onClick={() => { if (window.confirm("Заблокировать? Торговля подписчика остановится сразу; открытые позиции останутся на его бирже со стоп-лоссом.")) decide.mutate({ id: row.id, decision: "block" }); }}
               className="flex h-9 items-center gap-2 border border-destructive/40 px-3 text-xs font-bold text-destructive"><ShieldOff className="h-3.5 w-3.5" />Заблокировать</button>
           )}
           {(row.status === "blocked" || row.status === "rejected") && (
-            <button type="button" onClick={() => decide.mutate({ id: row.id, decision: "unblock" })}
-              className="flex h-9 items-center gap-2 border border-border px-3 text-xs font-bold"><Check className="h-3.5 w-3.5" />Одобрить</button>
+            <TermPicker row={row} label="Одобрить" busy={decide.isPending} onPick={(until) => decide.mutate({ id: row.id, decision: "unblock", until })} />
           )}
         </div>
       </li>
@@ -213,7 +250,7 @@ export default function JournalSubscribers() {
     <section className="page-frame mx-auto max-w-4xl space-y-5" data-testid="page-subscribers">
       <p className="text-sm text-muted-foreground">
         Любой, кто зарегистрировался, появляется здесь как заявка — и приходит вам в Telegram с кнопками «Одобрить» / «Отклонить».
-        Одобрение даёт подписку на месяц, «Продлить на месяц» добавляет месяц к оставшемуся. Подписчику о каждом решении и об окончании подписки пишет бот (если он привязал Telegram в кабинете). После одобрения человек сам вводит ключ BingX,
+        Одобрение — на выбранный срок: 1, 3, 6 месяцев или любая дата в календаре (подписка действует до конца этого дня); у одобренного кнопки «+N мес» считают от оставшегося срока. В момент окончания бот отключается от API подписчика — новые сделки и сопровождение позиций прекращаются; за сутки подписчику приходит сообщение с кнопкой «Продлить доступ — написать Люси». Подписчику о каждом решении и об окончании подписки пишет бот (если он привязал Telegram в кабинете). После одобрения человек сам вводит ключ BingX,
         выбирает стратегию и нажимает «Старт». По умолчанию торговля идёт на демо-счёте BingX VST; реальный счёт человек может выбрать, только если вы его разрешили. «Закрыть реальный счёт» сразу останавливает новые входы, открытые сделки бот доводит до закрытия. Ключи хранятся зашифрованными, их не видно даже здесь.
       </p>
       <SubscriberAccessToggles />

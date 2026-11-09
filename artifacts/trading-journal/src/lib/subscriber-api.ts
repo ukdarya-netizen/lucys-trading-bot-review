@@ -24,6 +24,8 @@ export type Subscription = {
   runtimeAt: string | null;
   telegramChatId: string | null;
   telegramUsername: string | null;
+  /** The owner's own cabinet: unlimited access, no date (owner 2026-11-09). */
+  isOwner?: boolean;
   subscribedUntil: string | null;
   subscriptionEnded: boolean;
   tradeSources: string[];

@@ -26,6 +26,7 @@ export function createSimExchange(opts: { equity?: number; prices?: Record<strin
   const MMR = 0.005;
   let dropNextOrderResponse = false;
   let rejectTakes = 0;
+  let rejectMargin = 0;
   const rateLimited = new Map<string, number>();
   let rejectMarginType = false;
   let dual = true;
@@ -119,6 +120,7 @@ export function createSimExchange(opts: { equity?: number; prices?: Record<strin
           liquidationPrice: liq(p), initialMargin: String(p.margin), minIncreaseMargin: "0.01", leverage: 10,
         })));
       case "POST /openApi/swap/v2/trade/positionMargin": {
+        if (rejectMargin > 0) { rejectMargin--; return err(101204, "Insufficient margin"); }
         const p = pos(sym!, q.positionSide as "LONG" | "SHORT");
         if (!p) return err(101400, "no position");
         const a = Number(q.amount);
@@ -208,6 +210,8 @@ export function createSimExchange(opts: { equity?: number; prices?: Record<strin
     hasPrice: (symbol: string) => prices.has(symbol),
     dropNextOrderResponse: () => { dropNextOrderResponse = true; },
     rejectTakes: (n: number) => { rejectTakes = n; },
+    /** The next n margin top-ups are refused by the exchange (test helper). */
+    rejectMargin: (n: number) => { rejectMargin = n; },
     rateLimit: (path: string, n: number) => { rateLimited.set(path, n); },
     rejectMarginType: (v: boolean) => { rejectMarginType = v; },
     setOneWay: () => { dual = false; },

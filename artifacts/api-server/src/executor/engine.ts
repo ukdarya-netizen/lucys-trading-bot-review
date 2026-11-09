@@ -25,10 +25,11 @@ import {
   takeFor, takePrice, topUpAmount, type Side,
 } from "./plan";
 import {
-  activeTrades, createTrade, event, getBtcSettings, getSourceSettings, symbolBusy, tradeById, tradesForSignal, updateTrade, type Trade,
+  activeTrades, commandsForSignal, createTrade, event, getBtcSettings, getSourceSettings, symbolBusy, tradeById, tradesForSignal, updateTrade, type Trade,
 } from "./store";
 import { fmt, pct, type Sender } from "./telegram";
-import { closeLine, resultLine, stopCloseKey, stopKindFor, stopMoveLine, type StopKind } from "./texts";
+import { cancelKey, closeLine, isCancelReason, resultLine, stopCloseKey, stopKindFor, stopMoveLine, type StopKind } from "./texts";
+import { parseCommand } from "./intake";
 
 export type SignalIn = {
   sourceSignalId: string; source: string; symbol: string; side: Side; pattern: string | null;
@@ -332,8 +333,23 @@ export function createExecutor(deps: {
       });
       if (Number(amount) <= 0) break;
       const bal = await rt.ex.balance("protect");
-      if (Number(amount) > bal.available) { await closeMarket(rt, t, "no_margin_for_stop"); return null; }
-      await rt.ex.addMargin(t.symbol, posSide(t.side), amount, "protect");
+      if (Number(amount) > bal.available) {
+        await event(rt.acct.id, t, "margin_add_impossible", { amount, available: bal.available, liquidation: p.liquidationPrice, stop: t.stop_price });
+        await say(`${head(rt, t)}\nЛиквидация раньше стопа, а свободной маржи не хватает: нужно долить ${amount} USDT, свободно ${fmt(bal.available)}.\nПозиция закрывается по рынку.`);
+        await closeMarket(rt, t, "no_margin_for_stop");
+        return null;
+      }
+      try {
+        await rt.ex.addMargin(t.symbol, posSide(t.side), amount, "protect");
+      } catch (e) {
+        // Owner 2026-11-09 (US): the position opened but BingX refused the top-up — the position is closed.
+        // A rate limit or a lost answer is not a refusal: the next pass (20 s) tries again.
+        if (!(e instanceof BingXError) || e.kind === "rate" || e.ambiguous) throw e;
+        await event(rt.acct.id, t, "margin_add_failed", { amount, message: errText(e), liquidation: p.liquidationPrice, stop: t.stop_price });
+        await say(`${head(rt, t)}\nBingX не принял доливку маржи ${amount} USDT (${errText(e)}): ликвидация осталась раньше стопа.\nПозиция закрывается по рынку.`);
+        await closeMarket(rt, t, "no_margin_for_stop");
+        return null;
+      }
       added += Number(amount);
       await event(rt.acct.id, t, "margin_added", { amount, liquidationBefore: p.liquidationPrice });
       const again = await findPosition(rt, t);
@@ -496,8 +512,11 @@ export function createExecutor(deps: {
     // except a close at the end of the holding time (the same limit as the bot's own).
     if (ownMgmt(t) && (cmd.type === "move_stop" || (cmd.type === "close" && cmd.reason !== "expired"))) { await done(); return; }
     if (cmd.type === "cancel_entry") {
-      if (t.status === "opening") await skip(rt, t, "source_cancelled");
-      else await closeMarket(rt, t, `source:${cmd.reason || "cancel"}`);
+      // Owner 2026-11-09: a cancellation is booked as a cancellation (cancel:<reason>), never as an ordinary close.
+      const key = cancelKey(cmd.reason);
+      if (t.status === "opening" && !t.entry_sent_at) await skip(rt, t, "source_cancelled");
+      else if (t.status === "opening" || t.status === "unknown") await updateTrade(t.id, { pending_close_reason: key }); // closed as soon as the entry is found
+      else if (t.status !== "closing") await closeMarket(rt, t, key);
     } else if (cmd.type === "move_stop" && cmd.stopPrice !== null) {
       if (t.status === "open") await replaceStop(rt, t, cmd.stopPrice, cmd.reason);
       else await updateTrade(t.id, { stop_price: cmd.stopPrice });
@@ -537,7 +556,36 @@ export function createExecutor(deps: {
     if (step.stop !== null) await replaceStop(rt, cur, step.stop, step.be && !t.be_moved && !(m.trail && peak >= m.trail.act) ? "breakeven" : "trailing");
   }
   const ownMgmt = (t: Trade) => Boolean(t.mgmt && t.mgmt !== "source");
+  const missingAtSource = new Map<string, number>();
   const isBtc = (symbol: string) => /^BTC-?USDT$/.test(symbol);
+
+  /**
+   * Commands stored in the inbox with a sequence after the last applied one, in order. Of several stop moves
+   * only the last is applied (an older level could only move the stop back). Commands without a sequence
+   * cannot be told apart from applied ones and are not replayed. Returns true when something was applied.
+   */
+  async function replayMissedCommands(rt: Runtime, t: Trade): Promise<boolean> {
+    const rows = await commandsForSignal(t.source_signal_id);
+    const missed: CommandIn[] = [];
+    for (const r of rows) {
+      const p = parseCommand(r.body, r.received_at.getTime());
+      if (p.ok && p.value.seq !== null && p.value.seq > t.last_command_seq) missed.push(p.value);
+    }
+    if (!missed.length) return false;
+    missed.sort((a, b) => a.seq! - b.seq!);
+    const lastMove = Math.max(...missed.filter((c) => c.type === "move_stop").map((c) => c.seq!), -1);
+    const terminal = missed.find((c) => c.type === "cancel_entry" || (c.type === "close" && (c.fraction ?? 1) >= 0.999));
+    const todo = terminal ? [terminal] : missed.filter((c) => c.type !== "move_stop" || c.seq === lastMove);
+    const f = await factorOf(t);
+    for (const c of todo) {
+      const cur = await tradeById(t.id);
+      if (!cur || !["open", "closing", "unknown", "opening"].includes(cur.status)) break;
+      await event(rt.acct.id, cur, "command_replayed", { commandId: c.commandId, type: c.type, seq: c.seq });
+      await applyCommand(rt, cur, f !== 1 && c.stopPrice !== null ? { ...c, stopPrice: c.stopPrice * f } : c);
+    }
+    // applyCommand records each applied sequence; an error is thrown and the next pass tries again.
+    return true;
+  }
 
   // ---------------- reconciliation ----------------
   async function reconcile(rt: Runtime): Promise<void> {
@@ -558,7 +606,7 @@ export function createExecutor(deps: {
           await protect(rt, cur, true);
           const after = await tradeById(cur.id);
           // The source closed it while we did not know the entry: close now.
-          if (after?.status === "open" && after.pending_close_reason?.startsWith("source")) await closeMarket(rt, after, after.pending_close_reason);
+          if (after?.status === "open" && (after.pending_close_reason?.startsWith("source") || isCancelReason(after.pending_close_reason))) await closeMarket(rt, after, after.pending_close_reason!);
           return;
         }
         if (age > 120_000 || cur.status === "opening") {
@@ -569,6 +617,9 @@ export function createExecutor(deps: {
         return;
       }
       if (!pos) { await finalize(rt, cur); return; }
+      // Owner 2026-11-09: a command that came but was not applied (BingX error, restart, it came before the
+      // entry) is applied from the inbox — a cancellation or close is never lost.
+      if (cur.status === "open" && await replayMissedCommands(rt, cur)) return;
       if (cur.status === "closing") {
         // Close sent but the position is still there after a minute: send it again.
         if (now() - cur.updated_at.getTime() > 60_000) await closeMarket(rt, cur, cur.pending_close_reason ?? "source");
@@ -601,7 +652,8 @@ export function createExecutor(deps: {
 
   async function onCommand(cmd: CommandIn): Promise<void> {
     const trades = await tradesForSignal(cmd.sourceSignalId);
-    if (trades.some((t) => !runtimes.has(t.account_id))) await refreshAccounts().catch(() => undefined);
+    // Fresh accounts every time: an account whose subscription just ended is not led a second longer (owner 2026-11-09).
+    await refreshAccounts().catch(() => undefined);
     await Promise.allSettled(trades.map(async (t) => {
       const rt = runtimes.get(t.account_id);
       if (!rt) return;
@@ -615,8 +667,13 @@ export function createExecutor(deps: {
   }
 
   /** Source position sync (backup for a lost command): close what the source closed, follow a raised stop. */
-  async function onSourceState(states: Array<{ sourceSignalId: string; action: string; stop: number | null }>): Promise<void> {
+  async function onSourceState(states: Array<{ sourceSignalId: string; action: string; stop: number | null; status?: string | null; cancelReason?: string | null }>): Promise<void> {
     const map = new Map(states.map((s) => [s.sourceSignalId, s]));
+    // A CAB signal whose row is gone at the source (deleted) is a cancellation once two syncs in a row agree.
+    for (const s of states) {
+      if (s.action === "unknown" && s.status == null) missingAtSource.set(s.sourceSignalId, (missingAtSource.get(s.sourceSignalId) ?? 0) + 1);
+      else missingAtSource.delete(s.sourceSignalId);
+    }
     for (const rt of runtimes.values()) {
       const trades = await activeTrades(rt.acct.id);
       for (const t of trades) {
@@ -627,6 +684,9 @@ export function createExecutor(deps: {
           if (!cur || cur.status !== "open") return;
           const stop = s.stop === null ? null : s.stop * (await factorOf(cur));
           if (s.action === "close") await closeMarket(rt, cur, "source_sync");
+          // Owner 2026-11-09: CAB sends cancelled / reclassified signals as "review" — the sync never closed them.
+          else if (s.status === "cancelled" || s.status === "reclassified") await closeMarket(rt, cur, cancelKey(s.status, true));
+          else if (s.action === "unknown" && s.status == null && (missingAtSource.get(s.sourceSignalId) ?? 0) >= 2) await closeMarket(rt, cur, cancelKey("removed", true));
           else if (stop !== null && cur.stop_price !== null &&
             (cur.side === "long" ? stop > cur.stop_price * 1.0005 : stop < cur.stop_price * 0.9995)) {
             await replaceStop(rt, cur, stop, "source_sync");

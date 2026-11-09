@@ -53,6 +53,10 @@ export default function TradeOverview() {
   const pnl = totals.reduce((s, t) => s + t.pnl, 0);
   const n = totals.reduce((s, t) => s + t.closed, 0);
   const wins = totals.reduce((s, t) => s + t.wins, 0);
+  // Owner 2026-11-09: closes by a source's cancellation are not wins or losses; their money stays in the result.
+  const cancelled = totals.reduce((s, t) => s + (t.cancelled ?? 0), 0);
+  const cancelledPnl = totals.reduce((s, t) => s + (t.cancelledPnl ?? 0), 0);
+  const counted = n - cancelled;
   const liq = totals.reduce((s, t) => s + t.liquidations, 0);
   const a = ownerAccountOf(d);
   const asset = a?.env === "real" ? "USDT" : "VST";
@@ -69,8 +73,8 @@ export default function TradeOverview() {
 
       <section className="grid grid-cols-2 gap-3 lg:grid-cols-6">
         <div className="col-span-2 lg:col-span-3"><Kpi icon={<Wallet className="h-5 w-5" />} label={a?.label ?? "Счёт"} value={a?.balance ? `${a.balance.equity.toLocaleString("ru-RU", { maximumFractionDigits: 2 })} ${asset}` : "—"} hint={a?.balance ? `свободно ${a.balance.available.toLocaleString("ru-RU", { maximumFractionDigits: 2 })}` : undefined} /></div>
-        <div className="col-span-2 lg:col-span-3"><Kpi icon={<TrendingUp className="h-5 w-5" />} label={`Результат закрытых · ${name}`} value={`${formatUsdt(pnl)} ${asset}`} tone={toneClass(n ? pnl : null)} hint={`${n} сделок`} /></div>
-        <div className="lg:col-span-2"><Kpi icon={<Percent className="h-5 w-5" />} label="Доля плюсовых" value={n ? `${Math.round((wins / n) * 100)}%` : "—"} hint={n ? `${wins} из ${n}` : "сделок ещё нет"} /></div>
+        <div className="col-span-2 lg:col-span-3"><Kpi icon={<TrendingUp className="h-5 w-5" />} label={`Результат закрытых · ${name}`} value={`${formatUsdt(pnl)} ${asset}`} tone={toneClass(n ? pnl : null)} hint={`${n} сделок${cancelled ? ` · из них отмены источника: ${cancelled} (${formatUsdt(cancelledPnl)} ${asset})` : ""}`} /></div>
+        <div className="lg:col-span-2"><Kpi icon={<Percent className="h-5 w-5" />} label="Доля плюсовых" value={counted > 0 ? `${Math.round((wins / counted) * 100)}%` : "—"} hint={counted > 0 ? `${wins} из ${counted}${cancelled ? " · отмены не считаются" : ""}` : "сделок ещё нет"} /></div>
         <div className="lg:col-span-2"><Kpi icon={<Crosshair className="h-5 w-5" />} label="Открыто сейчас" value={String(open.length)} tone={toneClass(open.length ? floating : null)} hint={`плавающий ${formatUsdt(floating)} ${asset}`} /></div>
         <div className="lg:col-span-2"><Kpi icon={<ShieldAlert className="h-5 w-5" />} label="Ликвидаций" value={String(liq)} tone={liq ? "text-destructive" : ""} hint={liq ? "нужно разобрать" : "ни одной"} /></div>
       </section>

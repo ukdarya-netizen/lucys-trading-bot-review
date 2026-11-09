@@ -14,7 +14,7 @@ import { parseCommand, parseSignal } from "./intake";
 import { resolveStrategy, topUpAmount } from "./plan";
 import { ensureExecutorTables } from "./store";
 
-const fake = createFakeBingX({ equity: 10_000, prices: { "BIRB-USDT": 100, "IDOL-USDT": 2, "BTC-USDT": 60000, "ZZZ-USDT": 100, "YYY-USDT": 100, "AAA-USDT": 100, "CCC-USDT": 100, "MOG-USDT": 0.0000005 } });
+const fake = createFakeBingX({ equity: 10_000, prices: { "BIRB-USDT": 100, "IDOL-USDT": 2, "BTC-USDT": 60000, "ZZZ-USDT": 100, "YYY-USDT": 100, "AAA-USDT": 100, "CCC-USDT": 100, "MOG-USDT": 0.0000005, "CNA-USDT": 100, "CNB-USDT": 100, "CNC-USDT": 100, "CND-USDT": 100, "MRG-USDT": 100 } });
 let host = "";
 const sent: string[] = [];
 let strategy = resolveStrategy({ strategy: "take5" });
@@ -499,4 +499,71 @@ test("a burst hits BingX's limit on positions several times in a row: the entry 
   assert.equal(t.status, "open", JSON.stringify(t));
   assert.ok(!sent.some((m) => m.includes("прервалась")));
   assert.equal(sent.filter((m) => m.includes("Открыт лонг") && m.includes("AAA")).length, 1);
+});
+
+// ---------------- owner 2026-11-09: cancellations, lost commands, margin refused ----------------
+const cancelCmd = (n: number, symbol: string, reason: string, seq = 1) => ({
+  commandId: `cab-cmd-${n}-${seq}`, sourceSignalId: `cab-signal-${n}`, symbol, type: "cancel_entry", eventSeq: seq,
+  eventAt: new Date().toISOString(), reason, source: "CryptoAltBullet",
+});
+
+test("CAB cancels an open signal: closed by market and booked as a cancellation, not as a close", async () => {
+  fake.setPrice("CNA-USDT", 100);
+  await ex.onSignal(sig(301, "CNAUSDT", 91, Date.now(), 100));
+  assert.equal((await trade(301)).status, "open");
+  const c = parseCommand(cancelCmd(301, "CNAUSDT", "abneon_gate_neutral_close_20261107"), Date.now());
+  assert.ok(c.ok);
+  await ex.onCommand(c.value);
+  const t = await trade(301);
+  assert.equal(t.status, "closed", JSON.stringify(t));
+  assert.equal(t.close_reason, "cancel:abneon_gate_neutral_close_20261107");
+  assert.equal(fake.positions.filter((p) => p.symbol === "CNA-USDT" && p.qty > 0).length, 0);
+  assert.match(sent.at(-1)!, /Отмена: CAB переклассифицировал сигнал — позиция закрыта по рынку/);
+});
+
+test("a cancellation that came but was never applied (lost to an error) is applied from the inbox by the reconcile pass", async () => {
+  fake.setPrice("CNB-USDT", 100);
+  await ex.onSignal(sig(302, "CNBUSDT", 91, Date.now(), 100));
+  assert.equal((await trade(302)).status, "open");
+  // Stored by the intake, but the executor never applied it.
+  await pool.query("INSERT INTO ex_inbox (kind, message_id, source_signal_id, body) VALUES ('command', $1, 'cab-signal-302', $2)",
+    ["cmd:cab-cmd-302-1", JSON.stringify(cancelCmd(302, "CNBUSDT", "cancelled"))]);
+  await ex.reconcileAll();
+  const t = await trade(302);
+  assert.equal(t.status, "closed", JSON.stringify(t));
+  assert.equal(t.close_reason, "cancel:cancelled");
+  assert.equal(t.last_command_seq, 1);
+  const ev = await pool.query("SELECT 1 FROM ex_events WHERE trade_id = $1 AND kind = 'command_replayed'", [t.id]);
+  assert.equal(ev.rowCount, 1);
+  // A second pass does nothing more.
+  await ex.reconcileAll();
+  assert.equal((await pool.query("SELECT 1 FROM ex_events WHERE trade_id = $1 AND kind = 'command_replayed'", [t.id])).rowCount, 1);
+});
+
+test("position sync: a signal CAB reclassified (sent as «review») is closed as a cancellation found by the sync", async () => {
+  fake.setPrice("CNC-USDT", 100);
+  await ex.onSignal(sig(303, "CNCUSDT", 91, Date.now(), 100));
+  assert.equal((await trade(303)).status, "open");
+  await ex.onSourceState([{ sourceSignalId: "cab-signal-303", action: "review", stop: 91, status: "reclassified", cancelReason: "ib_price24h_below_15" }]);
+  const t = await trade(303);
+  assert.equal(t.status, "closed", JSON.stringify(t));
+  assert.equal(t.close_reason, "cancel_sync:reclassified");
+  assert.match(sent.at(-1)!, /Отмена: CAB уже переклассифицировал сигнал \(найдено при сверке\)/);
+  // A signal still held by CAB is not touched.
+  fake.setPrice("CND-USDT", 100);
+  await ex.onSignal(sig(304, "CNDUSDT", 91, Date.now(), 100));
+  await ex.onSourceState([{ sourceSignalId: "cab-signal-304", action: "hold", stop: 91, status: "active" }]);
+  assert.equal((await trade(304)).status, "open");
+});
+
+test("the position opened but BingX refuses the margin top-up: the position is closed, not left with liquidation before the stop", async () => {
+  fake.setPrice("MRG-USDT", 100);
+  fake.rejectMargin(5);
+  await ex.onSignal(sig(305, "MRGUSDT", 91, Date.now(), 100));
+  const t = await trade(305);
+  assert.equal(t.status, "closed", JSON.stringify(t));
+  assert.equal(t.close_reason, "no_margin_for_stop");
+  assert.ok(sent.some((m) => m.includes("BingX не принял доливку маржи")));
+  assert.equal(fake.positions.filter((p) => p.symbol === "MRG-USDT" && p.qty > 0).length, 0);
+  fake.rejectMargin(0);
 });

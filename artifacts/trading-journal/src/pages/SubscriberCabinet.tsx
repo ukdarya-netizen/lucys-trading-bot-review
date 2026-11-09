@@ -508,9 +508,10 @@ const untilText = (s: string | null) =>
 /** Subscription term (owner 2026-11-03, as CAB): a month per approval. */
 function SubscriptionBanner({ sub }: { sub: Subscription }) {
   const until = untilText(sub.subscribedUntil);
+  if (sub.isOwner) return null; // the owner's access never ends: no date (owner 2026-11-09)
   if (sub.subscriptionEnded) {
     return <p className="border border-destructive/50 bg-destructive/10 p-4 text-sm text-destructive">
-      Подписка закончилась {until} — торговля остановлена. Чтобы продолжить, продлите подписку у владельца.</p>;
+      Подписка закончилась {until} — бот отключён от вашего API, торговля и сопровождение позиций остановлены. Чтобы продлить доступ — напишите Люси.</p>;
   }
   if (!until) return null;
   const leftDays = Math.ceil((new Date(sub.subscribedUntil!).getTime() - Date.now()) / 86_400_000);

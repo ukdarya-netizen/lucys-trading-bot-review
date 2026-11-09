@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { closeLine, closeReasonText, resultLine, stopCloseKey, stopKindFor, stopMoveLine } from "./texts";
+import { closeLine, closeReasonText, isCancelReason, resultLine, stopCloseKey, stopKindFor, stopMoveLine } from "./texts";
 
 test("stop kind from who moved it and where it is", () => {
   assert.equal(stopKindFor("trailing", "long", 100, 110), "trailing");
@@ -42,7 +42,11 @@ test("source closes say who closed and why; other closes have their own text", (
   assert.equal(closeLine("source:trailing_stop", { source: "cab" }), "CAB закрыл сделку по трейлинг-стопу — закрыта по рынку");
   assert.equal(closeLine("source:expired", { source: "nihilist" }), "Нигилист закрыл сделку по сроку сделки — закрыта по рынку");
   assert.equal(closeLine("source:stop_loss", { source: "nihilist" }), "Нигилист закрыл сделку по своему стоп-лоссу — закрыта по рынку");
-  assert.equal(closeLine("source:cancelled", { source: "cab" }), "CAB закрыл сделку — сигнал отменён — закрыта по рынку");
+  // Owner 2026-11-09: a cancellation is its own reason, old source:<cancel reason> keys included.
+  assert.equal(closeLine("source:cancelled", { source: "cab" }), "Отмена: CAB отменил сигнал — позиция закрыта по рынку");
+  assert.equal(closeLine("cancel:ib_p24h_neutral_close", { source: "cab" }), "Отмена: CAB переклассифицировал сигнал — позиция закрыта по рынку");
+  assert.equal(closeLine("cancel_sync:cancelled", { source: "cab" }), "Отмена: CAB уже отменил сигнал (найдено при сверке) — позиция закрыта по рынку");
+  assert.ok(isCancelReason("source:abneon_gate_neutral_close_20261107") && !isCancelReason("source:trailing_stop") && !isCancelReason("stop_loss"));
   assert.equal(closeLine("take", { source: "cab", takePct: 5 }), "Тейк +5% исполнен — прибыль зафиксирована");
   for (const k of ["liquidation", "manual", "source_sync", "timeout", "no_margin_for_stop", "liquidation_before_stop", "take_partial"]) {
     assert.notEqual(closeLine(k, { source: "cab" }), k, k);

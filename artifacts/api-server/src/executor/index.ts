@@ -14,7 +14,7 @@ import { accountEntryAllowed } from "./trading-controls";
 /** One simulated exchange for the PAPER account (its state lives in ex_paper_state). */
 let paperFetch: ReturnType<typeof createPaperFetch> | null = null;
 import { REASON_TEXT, createExecutor, type Executor } from "./engine";
-import { closeReasonText } from "./texts";
+import { closeReasonText, isCancelReason } from "./texts";
 import { createIntakeHandler } from "./intake";
 import { BTC_MAX_LEVERAGE, ensureExecutorTables, getBtcSettings, getSourceSettings, saveSourceSettings, type SourceSettings } from "./store";
 import { nihilistStrategies, nihilistStrategy } from "./plan";
@@ -35,7 +35,7 @@ export function executorRequestHandler(req: IncomingMessage, res: ServerResponse
   void handler(req, res);
 }
 
-export type SourceState = { sourceSignalId: string; action: string; stop: number | null };
+export type SourceState = { sourceSignalId: string; action: string; stop: number | null; status?: string | null; cancelReason?: string | null };
 type SyncSource = "cab" | "nihilist";
 
 /** Where each source's position sync lives and its token. Nihilist's address: NIHILIST_POSITION_SYNC_URL. */
@@ -78,7 +78,10 @@ export async function readSourceSync(source: SyncSource, afterId = 0, fetchImpl:
         const v = Number(p.sourceStopLossPrice);
         stop = Number.isFinite(v) && v > 0 ? v : null;
       }
-      out.push({ sourceSignalId: String(p.sourceSignalId), action: String(p.sourceAction), stop });
+      // The source's own status (CAB: cancelled / reclassified come as action "review").
+      const status = typeof p.sourceStatus === "string" ? p.sourceStatus : null;
+      out.push({ sourceSignalId: String(p.sourceSignalId), action: String(p.sourceAction), stop, status,
+        cancelReason: typeof p.sourceCancelReason === "string" ? p.sourceCancelReason : null });
     }
     after = body.nextAfterId ?? null;
   }
@@ -148,6 +151,9 @@ export async function startExecutor(log: (msg: string, extra?: unknown) => void)
 }
 
 const SOURCE_NAME: Record<string, string> = { cab: "CAB", nihilist: "Нигилист" };
+/** Owner 2026-11-09: closes caused by a source's cancellation (see texts.ts isCancelReason) — not a win or a loss. */
+const CANCEL_SQL = `coalesce(close_reason LIKE 'cancel:%' OR close_reason LIKE 'cancel\\_sync:%'
+  OR (close_reason LIKE 'source:%' AND substr(close_reason, 8) NOT IN ('stop_loss','expired','breakeven_stop','breakeven_close','trailing_stop','profit','core_exit','close','')), false)`;
 const STATUS_TEXT: Record<string, string> = {
   opening: "открывается", open: "открыта", closing: "закрывается", closed: "закрыта",
   skipped: "не открыта", failed: "не открыта (ошибка)", unknown: "сверяется с биржей",
@@ -162,7 +168,7 @@ function tradeView(t: any) {
   return {
     id: t.id, accountId: t.account_id, source: t.source, sourceName: SOURCE_NAME[t.source] ?? t.source, sourceSignalId: t.source_signal_id,
     symbol: t.symbol, side: t.side, pattern: t.pattern, env: t.env, status: t.status, statusText: STATUS_TEXT[t.status] ?? t.status,
-    reason: reasonKey ?? null, reasonText, takePct: n(t.take_pct),
+    reason: reasonKey ?? null, reasonText, takePct: n(t.take_pct), cancelled: t.status === "closed" && isCancelReason(t.close_reason),
     leverage: n(t.leverage) ?? 10, mgmt: t.mgmt ?? null, mgmtLabel: t.mgmt ? nihilistStrategy(t.mgmt).label : null, peakPct: n(t.peak_pct),
     signalAt: iso(t.signal_at), receivedAt: iso(t.received_at), entrySentAt: iso(t.entry_sent_at), openedAt: iso(t.opened_at), closedAt: iso(t.closed_at),
     entryDelaySec: sentAt ? Math.round((sentAt - new Date(t.received_at).getTime()) / 100) / 10 : null,
@@ -209,7 +215,9 @@ export async function executorStatus(): Promise<unknown> {
     pool.query("SELECT * FROM ex_trades WHERE status = 'closed' ORDER BY closed_at DESC NULLS LAST, id DESC LIMIT 500"),
     pool.query("SELECT * FROM ex_trades WHERE status IN ('skipped','failed') ORDER BY id DESC LIMIT 300"),
     pool.query(`SELECT account_id, source, side, count(*)::int AS closed,
-                       count(*) FILTER (WHERE pnl > 0)::int AS wins, count(*) FILTER (WHERE pnl < 0)::int AS losses,
+                       count(*) FILTER (WHERE pnl > 0 AND NOT ${CANCEL_SQL})::int AS wins, count(*) FILTER (WHERE pnl < 0 AND NOT ${CANCEL_SQL})::int AS losses,
+                       count(*) FILTER (WHERE ${CANCEL_SQL})::int AS cancelled,
+                       coalesce(sum(pnl) FILTER (WHERE ${CANCEL_SQL}), 0)::float8 AS cancelled_pnl,
                        count(*) FILTER (WHERE close_reason = 'liquidation')::int AS liquidations,
                        coalesce(sum(pnl), 0)::float8 AS pnl
                 FROM ex_trades WHERE status = 'closed' GROUP BY 1, 2, 3 ORDER BY 1, 2, 3`),
@@ -245,7 +253,8 @@ export async function executorStatus(): Promise<unknown> {
     closed: closedQ.rows.map(tradeView),
     skipped: skippedQ.rows.map(tradeView),
     totals: totalsQ.rows.map((r) => ({ accountId: r.account_id, source: r.source, sourceName: SOURCE_NAME[r.source] ?? r.source, side: r.side,
-      closed: r.closed, wins: r.wins, losses: r.losses, liquidations: r.liquidations, pnl: Number(r.pnl) })),
+      closed: r.closed, wins: r.wins, losses: r.losses, liquidations: r.liquidations, pnl: Number(r.pnl),
+      cancelled: r.cancelled, cancelledPnl: Number(r.cancelled_pnl) })),
     skippedTotals: skipTotalsQ.rows.map((r) => ({ source: r.source, sourceName: SOURCE_NAME[r.source] ?? r.source, reason: r.reason,
       reasonText: REASON_TEXT[r.reason] ?? r.reason, n: r.n })),
   };

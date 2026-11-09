@@ -36,7 +36,7 @@ export type Status = {
   } | null;
   sync: Record<string, { at: string | null; ok: boolean | null; error: string | null }>;
   open: Trade[]; closed: Trade[]; skipped: Trade[];
-  totals: Array<{ accountId: string; source: string; sourceName: string; side: "long" | "short"; closed: number; wins: number; losses: number; liquidations: number; pnl: number }>;
+  totals: Array<{ accountId: string; source: string; sourceName: string; side: "long" | "short"; closed: number; wins: number; losses: number; liquidations: number; pnl: number; cancelled?: number; cancelledPnl?: number }>;
   skippedTotals: Array<{ source: string; sourceName: string; reason: string; reasonText: string; n: number }>;
 };
 type Events = { trade: Trade; events: Array<{ id: number; kind: string; detail: Record<string, unknown>; at: string }> };
@@ -164,7 +164,7 @@ export function TotalsTable({ d, filter }: { d: Status; filter: SourceFilter }) 
     <div className="overflow-x-auto">
       <table className="w-full min-w-[640px] text-sm">
         <thead className="text-left text-[10px] uppercase text-muted-foreground">
-          <tr><th className="py-1 pr-3">Бот</th><th className="pr-3">Сторона</th><th className="pr-3">Сделок</th><th className="pr-3">В плюс</th><th className="pr-3">В минус</th><th className="pr-3">Доля плюсовых</th><th className="pr-3">Ликвидаций</th><th className="pr-3">Результат</th></tr>
+          <tr><th className="py-1 pr-3">Бот</th><th className="pr-3">Сторона</th><th className="pr-3">Сделок</th><th className="pr-3">В плюс</th><th className="pr-3">В минус</th><th className="pr-3">Доля плюсовых</th><th className="pr-3">Ликвидаций</th><th className="pr-3">Отмены источника</th><th className="pr-3">Результат</th></tr>
         </thead>
         <tbody>
           {rows.map((t) => (
@@ -172,8 +172,9 @@ export function TotalsTable({ d, filter }: { d: Status; filter: SourceFilter }) 
               <td className="py-1.5 pr-3 font-bold">{t.sourceName}</td>
               <td className={`pr-3 font-bold ${sideCls(t.side)}`}>{sideText(t.side)}</td>
               <td className="pr-3 tabular">{t.closed}</td><td className="pr-3 tabular text-success">{t.wins}</td><td className="pr-3 tabular text-destructive">{t.losses}</td>
-              <td className="pr-3 tabular">{t.closed ? `${Math.round((t.wins / t.closed) * 100)}%` : "—"}</td>
+              <td className="pr-3 tabular">{t.closed - (t.cancelled ?? 0) > 0 ? `${Math.round((t.wins / (t.closed - (t.cancelled ?? 0))) * 100)}%` : "—"}</td>
               <td className={`pr-3 tabular ${t.liquidations ? "font-bold text-destructive" : ""}`}>{t.liquidations}</td>
+              <td className="pr-3 tabular text-muted-foreground">{t.cancelled ? `${t.cancelled} · ${formatUsdt(t.cancelledPnl ?? 0)}` : "—"}</td>
               <td className={`pr-3 font-bold tabular ${toneClass(t.pnl)}`}>{formatUsdt(t.pnl)}</td>
             </tr>
           ))}

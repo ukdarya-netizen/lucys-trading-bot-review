@@ -20,6 +20,9 @@ export type SubRow = Record<string, any> & { id: number; status: string };
 const API = "https://api.telegram.org";
 const token = () => process.env.TELEGRAM_BOT_TOKEN?.trim() || "";
 const ownerChat = () => process.env.TELEGRAM_CHAT_ID?.trim() || "";
+/** The owner's own row (her cabinet): her access never ends (owner 2026-11-09). */
+export const isOwnerRow = (r: Record<string, any> | null | undefined) =>
+  Boolean(r?.clerk_user_id) && r!.clerk_user_id === process.env.JOURNAL_OWNER_USER_ID;
 const TZ = "Europe/Samara";
 
 export const dateText = (d: Date | string | null | undefined) =>
@@ -37,6 +40,8 @@ export const TEXT = {
   ].filter((x) => x !== null).join("\n"),
   ownerDecided: (r: SubRow, what: string) => `${what}\n👤 ${who(r)}${r.email ? `\n📧 ${r.email}` : ""}${r.subscribed_until ? `\n📅 Подписка до ${dateText(r.subscribed_until)}` : ""}`,
   ownerExpired: (r: SubRow) => `⌛ Подписка закончилась, торговля остановлена\n👤 ${who(r)}${r.email ? `\n📧 ${r.email}` : ""}`,
+  ownerRenewRequest: (r: SubRow) => `🔔 Подписчик просит продлить доступ\n👤 ${who(r)}${r.email ? `\n📧 ${r.email}` : ""}${r.telegram_username ? `\n💬 @${r.telegram_username}` : ""}\n📅 ${r.subscribed_until && new Date(r.subscribed_until) > new Date() ? `Подписка до ${dateText(r.subscribed_until)}` : "Подписка закончилась"}`,
+  renewRequested: "✅ Запрос отправлен Люси. Как только она продлит доступ, бот пришлёт сообщение с новой датой.",
 
   started: (until: Date | null) => [
     "🎉 Ваша подписка на торгового бота активирована!",
@@ -49,9 +54,10 @@ export const TEXT = {
   rejected: "❌ Заявка на доступ к торговому боту отклонена.\n\nЕсли это ошибка — напишите владельцу.",
   blocked: "🚫 Доступ к торговому боту приостановлен администратором. Торговля остановлена: новые сделки не открываются, открытые позиции остаются на бирже со своими стопами.\n\nПо вопросам обращайтесь напрямую.",
   unblocked: (until: Date | null) => `✅ Доступ к торговому боту снова открыт.\n\n📅 Подписка до: ${dateText(until)}\n\nЧтобы торговля шла, запустите её в кабинете на сайте.`,
-  ending: (days: number, until: Date) =>
-    `⏳ Подписка на торгового бота заканчивается ${days <= 1 ? "завтра" : `через ${days} дня`} — ${dateText(until)}.\n\nЧтобы торговля не остановилась, продлите подписку у владельца.`,
-  ended: "⌛ Подписка на торгового бота закончилась — торговля остановлена: новые сделки не открываются, открытые позиции остаются на бирже со своими стопами.\n\nЧтобы продолжить, продлите подписку у владельца.",
+  ending: (days: number, until: Date) => days <= 1
+    ? `⏳ Подписка на торгового бота заканчивается через сутки — ${dateText(until)}.\n\nВ этот момент бот отключится от вашего API: новые сделки не откроются, сопровождение открытых позиций прекратится (они останутся на бирже со своими стопами).\n\nЧтобы продлить доступ — напишите Люси: кнопка ниже.`
+    : `⏳ Подписка на торгового бота заканчивается через ${days} дня — ${dateText(until)}.\n\nЧтобы продлить доступ — напишите Люси: кнопка ниже.`,
+  ended: "⌛ Подписка на торгового бота закончилась — бот отключён от вашего API: новые сделки не открываются, сопровождение открытых позиций остановлено (они остаются на бирже со своими стопами).\n\nЧтобы продолжить — напишите Люси: кнопка ниже.",
   linked: (r: SubRow) => `✅ Telegram привязан к кабинету торгового бота.\n\n👤 ${who(r)}\n📅 Подписка: ${r.status === "approved" ? `до ${dateText(r.subscribed_until)}` : r.status === "pending" ? "заявка ждёт одобрения" : "нет доступа"}`,
   start: (chatId: string) => [
     "👋 Это Lucy's Trading Bot.",
@@ -65,14 +71,16 @@ export const TEXT = {
     : "Этот Telegram не привязан к кабинету. Нажмите /start и впишите Chat ID в кабинете на сайте.",
 };
 
-export const OWNER_REQUEST_KEYBOARD = (id: number): Keyboard => [[
-  { text: "✅ Одобрить", callback_data: `sub_approve:${id}` },
-  { text: "❌ Отклонить", callback_data: `sub_reject:${id}` },
-]];
-const OWNER_EXPIRED_KEYBOARD = (id: number): Keyboard => [[
-  { text: "🔄 Продлить на месяц", callback_data: `sub_approve:${id}` },
-  { text: "🚫 Заблокировать", callback_data: `sub_block:${id}` },
-]];
+// Owner 2026-11-09: approval for a chosen term (1 / 3 months here; any date on the site's calendar).
+export const OWNER_REQUEST_KEYBOARD = (id: number): Keyboard => [
+  [{ text: "✅ 1 месяц", callback_data: `sub_approve:${id}:1` }, { text: "✅ 3 месяца", callback_data: `sub_approve:${id}:3` }],
+  [{ text: "❌ Отклонить", callback_data: `sub_reject:${id}` }],
+];
+const OWNER_EXPIRED_KEYBOARD = (id: number): Keyboard => [
+  [{ text: "🔄 +1 месяц", callback_data: `sub_approve:${id}:1` }, { text: "🔄 +3 месяца", callback_data: `sub_approve:${id}:3` }],
+  [{ text: "🚫 Заблокировать", callback_data: `sub_block:${id}` }],
+];
+const RENEW_KEYBOARD = (id: number): Keyboard => [[{ text: "✍️ Продлить доступ — написать Люси", callback_data: `sub_renew_req:${id}` }]];
 
 // ---------------- transport ----------------
 async function tg(method: string, body: Record<string, unknown>, timeoutMs = 15_000): Promise<any> {
@@ -92,7 +100,7 @@ export async function send(chatId: string | number | null | undefined, text: str
   return Boolean(r?.ok);
 }
 export const toOwner = (text: string, keyboard?: Keyboard) => send(ownerChat(), text, keyboard);
-export const toSubscriber = (r: SubRow, text: string) => send(r.telegram_chat_id, text);
+export const toSubscriber = (r: SubRow, text: string, keyboard?: Keyboard) => send(r.telegram_chat_id, text, keyboard);
 
 let botName: string | null = null;
 export async function botUsername(): Promise<string | null> {
@@ -110,21 +118,27 @@ export type Decision = "approve" | "reject" | "block" | "unblock";
  * subscription (renewal); reject / block stop trading; unblock gives the
  * subscription back (a month from now if it had ended). The subscriber is told.
  */
-export async function decide(id: number, decision: Decision, by: string): Promise<{ row: SubRow; text: string } | null> {
+export type Term = { months?: number; until?: Date };
+export async function decide(id: number, decision: Decision, by: string, term: Term = {}): Promise<{ row: SubRow; text: string } | null> {
   const cur = (await pool.query("SELECT * FROM subscribers WHERE id = $1", [id])).rows[0] as SubRow | undefined;
   if (!cur) return null;
   const now = new Date();
   const active = cur.status === "approved" && (!cur.subscribed_until || new Date(cur.subscribed_until) > now);
   const base = cur.status === "approved" && cur.subscribed_until && new Date(cur.subscribed_until) > now ? new Date(cur.subscribed_until) : now;
-  const plusMonth = new Date(base); plusMonth.setMonth(plusMonth.getMonth() + 1);
+  // Owner 2026-11-09: a chosen date is the end itself; N months are added to what is left (renewal).
+  const months = term.months && Number.isInteger(term.months) && term.months > 0 && term.months <= 24 ? term.months : 1;
+  const plusMonth = new Date(base); plusMonth.setMonth(plusMonth.getMonth() + months);
+  const chosen = term.until && term.until.getTime() > now.getTime() ? term.until : null;
   let row: SubRow;
   if (decision === "approve" || decision === "unblock") {
-    const until = decision === "unblock" && cur.subscribed_until && new Date(cur.subscribed_until) > now ? new Date(cur.subscribed_until) : plusMonth;
+    // The owner's own access never ends: no date (owner 2026-11-09).
+    const until = isOwnerRow(cur) ? null
+      : chosen ?? (decision === "unblock" && !term.months && cur.subscribed_until && new Date(cur.subscribed_until) > now ? new Date(cur.subscribed_until) : plusMonth);
     row = (await pool.query(
       `UPDATE subscribers SET status = 'approved', decided_at = now(), decided_by = $2, subscribed_until = $3, expiry_notice = NULL,
          version = version + 1, updated_at = now() WHERE id = $1 RETURNING *`, [id, by, until])).rows[0];
     const renewal = decision === "approve" && active && cur.subscribed_until;
-    void toSubscriber(row, decision === "unblock" ? TEXT.unblocked(until) : renewal ? TEXT.renewed(until) : TEXT.started(until));
+    if (!isOwnerRow(row)) void toSubscriber(row, decision === "unblock" ? TEXT.unblocked(until) : renewal ? TEXT.renewed(until) : TEXT.started(until));
     return { row, text: decision === "unblock" ? "✅ Доступ снова открыт" : renewal ? "🔄 Подписка продлена" : "✅ Одобрено" };
   }
   const status = decision === "reject" ? "rejected" : "blocked";
@@ -144,7 +158,8 @@ export async function announceRequest(r: SubRow): Promise<void> {
 /** Reminders 3 days and 1 day before; at the end trading stops, subscriber and owner are told. */
 export async function expiryPass(now = new Date()): Promise<void> {
   const { rows } = await pool.query(
-    `SELECT * FROM subscribers WHERE status = 'approved' AND subscribed_until IS NOT NULL AND subscribed_until < $1::timestamptz + interval '3 days'`, [now]);
+    `SELECT * FROM subscribers WHERE status = 'approved' AND subscribed_until IS NOT NULL AND subscribed_until < $1::timestamptz + interval '3 days'
+       AND clerk_user_id IS DISTINCT FROM $2`, [now, process.env.JOURNAL_OWNER_USER_ID ?? null]);
   for (const r of rows as SubRow[]) {
     const until = new Date(r.subscribed_until);
     const leftH = (until.getTime() - now.getTime()) / 3_600_000;
@@ -155,12 +170,12 @@ export async function expiryPass(now = new Date()): Promise<void> {
         `UPDATE subscribers SET expiry_notice = 'ended', trading_enabled = false, version = version + 1, updated_at = now()
          WHERE id = $1 AND (expiry_notice IS DISTINCT FROM 'ended') RETURNING *`, [r.id]);
       if (!upd.rowCount) continue;
-      await toSubscriber(r, TEXT.ended);
+      await toSubscriber(r, TEXT.ended, RENEW_KEYBOARD(r.id));
       await toOwner(TEXT.ownerExpired(r), OWNER_EXPIRED_KEYBOARD(r.id));
     } else {
       const upd = await pool.query("UPDATE subscribers SET expiry_notice = $2 WHERE id = $1 AND (expiry_notice IS DISTINCT FROM $2) RETURNING id", [r.id, stage]);
       if (!upd.rowCount) continue;
-      await toSubscriber(r, TEXT.ending(stage === "1d" ? 1 : 3, until));
+      await toSubscriber(r, TEXT.ending(stage === "1d" ? 1 : 3, until), RENEW_KEYBOARD(r.id));
     }
   }
 }
@@ -179,14 +194,25 @@ export async function handleUpdate(u: any): Promise<void> {
     const cq = u.callback_query;
     const data = String(cq.data ?? "");
     const chatId = String(cq.message?.chat?.id ?? "");
-    const m = /^sub_(approve|reject|block):(\d+)$/.exec(data);
+    // A subscriber asks to renew (button under the «ends tomorrow» / «ended» message): the owner gets it with the term buttons.
+    const rq = /^sub_renew_req:(\d+)$/.exec(data);
+    if (rq) {
+      const r = (await pool.query("SELECT * FROM subscribers WHERE id = $1", [Number(rq[1])])).rows[0] as SubRow | undefined;
+      const mine = r && (String(r.telegram_chat_id ?? "") === chatId || String(r.telegram_chat_id ?? "") === String(cq.from?.id ?? ""));
+      if (!r || !mine) { await tg("answerCallbackQuery", { callback_query_id: cq.id, text: "Не найдено" }); return; }
+      await toOwner(TEXT.ownerRenewRequest(r), r.status === "approved" ? OWNER_EXPIRED_KEYBOARD(r.id) : OWNER_REQUEST_KEYBOARD(r.id));
+      await tg("answerCallbackQuery", { callback_query_id: cq.id, text: "Запрос отправлен" });
+      await send(chatId, TEXT.renewRequested);
+      return;
+    }
+    const m = /^sub_(approve|reject|block):(\d+)(?::(\d+))?$/.exec(data);
     if (!m) { await tg("answerCallbackQuery", { callback_query_id: cq.id }); return; }
     // Only the owner's chat gets these buttons, and only it may press them.
     if (!ownerChat() || (chatId !== ownerChat() && String(cq.from?.id) !== ownerChat())) {
       await tg("answerCallbackQuery", { callback_query_id: cq.id, text: "⛔ Только владелец может это сделать" });
       return;
     }
-    const out = await decide(Number(m[2]), m[1] as Decision, `telegram:${cq.from?.id ?? "owner"}`);
+    const out = await decide(Number(m[2]), m[1] as Decision, `telegram:${cq.from?.id ?? "owner"}`, m[3] ? { months: Number(m[3]) } : {});
     await tg("answerCallbackQuery", { callback_query_id: cq.id, text: out ? out.text : "Не найден" });
     if (out && cq.message) await tg("editMessageText", { chat_id: cq.message.chat.id, message_id: cq.message.message_id, text: TEXT.ownerDecided(out.row, out.text) });
     return;
@@ -233,5 +259,5 @@ export function startSubscriberBot(log: (msg: string, extra?: unknown) => void):
   })();
   const tick = () => void expiryPass().catch((e) => log("subscriber bot: expiry pass failed", e));
   tick();
-  setInterval(tick, 10 * 60_000).unref?.();
+  setInterval(tick, 60_000).unref?.(); // the end is announced within a minute (owner 2026-11-09)
 }

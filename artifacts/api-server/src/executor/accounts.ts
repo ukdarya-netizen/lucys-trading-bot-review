@@ -152,9 +152,14 @@ export async function loadAccounts(): Promise<Account[]> {
       `SELECT id, name, email, strategy, pattern_exit, patterns, api_key_encrypted, api_secret_encrypted,
               allocation_mode, allocation_value, trading_started_at, trade_sources
        FROM subscribers
-       WHERE status = 'approved' AND trading_enabled AND trading_account = 'vst'
+       WHERE status = 'approved' AND trading_account = 'vst'
          AND (subscribed_until IS NULL OR subscribed_until > now())
-         AND api_key_encrypted IS NOT NULL AND api_secret_encrypted IS NOT NULL`,
+         AND api_key_encrypted IS NOT NULL AND api_secret_encrypted IS NOT NULL
+         -- «Стоп» stops new entries only (accountEntryAllowed): open trades are led to the end (owner 2026-11-09).
+         -- When the subscription ends or access is blocked the account is disconnected at once, open trades included.
+         AND (trading_enabled OR EXISTS (
+           SELECT 1 FROM ex_trades t WHERE t.account_id = 'sub-' || subscribers.id || '-vst'
+             AND t.status IN ('opening','open','closing','unknown')))`,
     );
     for (const s of r.rows) {
       try {

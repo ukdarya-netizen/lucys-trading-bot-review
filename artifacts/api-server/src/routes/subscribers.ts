@@ -2,7 +2,7 @@ import { clerkClient, getAuth } from "@clerk/express";
 import { Router, type IRouter, type Request, type Response } from "express";
 import { pool } from "@workspace/db";
 import { SetSubscriberSourcesBody, SetSubscriberSourcesParams, SetSubscriberSourcesResponse } from "@workspace/api-zod";
-import { announceRequest, botUsername, decide, send as sendTelegram, TEXT as SUB_TEXT, type Decision } from "../lib/subscriber-bot";
+import { announceRequest, botUsername, decide, isOwnerRow, send as sendTelegram, TEXT as SUB_TEXT, type Decision, type Term } from "../lib/subscriber-bot";
 import { BTC_MAX_LEVERAGE, getBtcSettings, getSourceSettings, saveBtcSettings } from "../executor/store";
 import { closeReasonText } from "../executor/texts";
 import { subscriberTrades } from "../lib/subscriber-trades";
@@ -94,8 +94,10 @@ function publicView(row: Row) {
     runtimeAt: row.runtime_at ?? null,
     telegramChatId: (row.telegram_chat_id as string | null | undefined) ?? null,
     telegramUsername: (row.telegram_username as string | null | undefined) ?? null,
-    subscribedUntil: row.subscribed_until ?? null,
-    subscriptionEnded: subscriptionEnded(row),
+    // Owner 2026-11-09: the owner's own access is unlimited — no date anywhere.
+    isOwner: isOwnerRow(row),
+    subscribedUntil: isOwnerRow(row) ? null : row.subscribed_until ?? null,
+    subscriptionEnded: !isOwnerRow(row) && subscriptionEnded(row),
     tradeSources: String(row.trade_sources ?? "cab").split(",").filter(Boolean),
   };
 }
@@ -114,14 +116,15 @@ async function subscriberFor(req: Request): Promise<Row> {
   if (isOwner(userId) && row.status !== "approved") {
     const approved = await pool.query(
       `UPDATE subscribers SET status = 'approved', real_allowed = true, decided_at = now(), decided_by = $2,
-         version = version + 1, updated_at = now() WHERE id = $1 RETURNING *`,
+         subscribed_until = NULL, expiry_notice = NULL, version = version + 1, updated_at = now() WHERE id = $1 RETURNING *`,
       [row.id, userId]);
     return approved.rows[0] as Row;
   }
-  if (isOwner(userId) && !row.real_allowed) {
-    const allowed = await pool.query(
-      "UPDATE subscribers SET real_allowed = true, updated_at = now() WHERE id = $1 RETURNING *", [row.id]);
-    return allowed.rows[0] as Row;
+  // The owner's access never ends (owner 2026-11-09): a date set by an earlier approval is removed.
+  if (isOwner(userId) && (row.subscribed_until || row.expiry_notice || !row.real_allowed)) {
+    const fixed = await pool.query(
+      "UPDATE subscribers SET subscribed_until = NULL, expiry_notice = NULL, real_allowed = true, updated_at = now() WHERE id = $1 RETURNING *", [row.id]);
+    return fixed.rows[0] as Row;
   }
   return row;
 }
@@ -576,7 +579,7 @@ router.post("/me/trading", async (req, res) => {
   const enable = req.body?.enabled === true;
   if (enable) {
     if (row.status !== "approved") return refuse(res, 403, "not_approved", "Заявка ещё не одобрена");
-    if (subscriptionEnded(row)) return refuse(res, 403, "subscription_ended", "Подписка закончилась — продлите её у владельца");
+    if (subscriptionEnded(row)) return refuse(res, 403, "subscription_ended", "Подписка закончилась — чтобы продлить доступ, напишите Люси");
     if (!row.api_key_verified_at) return refuse(res, 422, "no_key", "Сначала добавьте и проверьте ключ BingX");
     // A CAB strategy is needed only when the person trades CAB signals (Nihilist is led by the owner's rules).
     if (String(row.trade_sources ?? "cab").split(",").includes("cab") && !subscriberTradingStrategy(row)) {
@@ -713,11 +716,21 @@ router.post("/journal/subscribers/:id/sources", requireJournalSession, requireJo
 
 router.post("/journal/subscribers/:id/decision", requireJournalSession, requireJournalOwner, async (req, res) => {
   const id = Number(req.params.id);
+  // Owner 2026-11-09: approval for a term — a date from the calendar (to the end of that day, Samara time) or N months.
+  const untilRaw = typeof req.body?.until === "string" ? req.body.until : "";
+  const months = Number(req.body?.months);
+  let term: Term = {};
+  if (untilRaw) {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(untilRaw)) return refuse(res, 422, "invalid_until", "Неверная дата");
+    const until = new Date(`${untilRaw}T23:59:59+04:00`);
+    if (!(until.getTime() > Date.now())) return refuse(res, 422, "until_in_past", "Дата окончания должна быть в будущем");
+    term = { until };
+  } else if (Number.isInteger(months) && months > 0 && months <= 24) term = { months };
   // "extend" = approve again: one more month (owner 2026-11-03, as CAB). The subscriber is told in Telegram.
   const raw = String(req.body?.decision ?? "");
   const decision = (raw === "extend" ? "approve" : raw) as Decision;
   if (!Number.isSafeInteger(id) || !["approve", "reject", "block", "unblock"].includes(decision)) return refuse(res, 422, "invalid_decision", "Неверное решение");
-  const out = await decide(id, decision, String(getAuth(req).userId ?? "owner"));
+  const out = await decide(id, decision, String(getAuth(req).userId ?? "owner"), term);
   if (!out) return refuse(res, 404, "not_found", "Подписчик не найден");
   res.json({ subscriber: publicView(out.row as Row) });
 });

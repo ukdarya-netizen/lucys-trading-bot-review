@@ -169,6 +169,13 @@ export async function inboxGet(messageId: string): Promise<{ body: any } | null>
   return r.rows[0] ?? null;
 }
 
+/** Commands received for a signal, oldest first (owner 2026-11-09: replay of commands that were not applied). */
+export async function commandsForSignal(sourceSignalId: string): Promise<Array<{ body: any; received_at: Date }>> {
+  const r = await pool.query<{ body: any; received_at: Date }>(
+    "SELECT body, received_at FROM ex_inbox WHERE kind = 'command' AND source_signal_id = $1 ORDER BY id", [sourceSignalId]);
+  return r.rows;
+}
+
 /** New trade row; null when this account already has one for the signal. */
 export async function createTrade(t: {
   account_id: string; source: string; source_signal_id: string; symbol: string; side: Side; pattern: string | null; env: string;
