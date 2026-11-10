@@ -30,7 +30,7 @@ import {
 } from "./store";
 import { productionTrading } from "./trading-controls";
 import { fmt, pct, type Sender } from "./telegram";
-import { cancelKey, closeLine, isCancelReason, resultLine, stopCloseKey, stopKindFor, stopMoveLine, type StopKind } from "./texts";
+import { cancelKey, closeLine, isCancelReason, resultLine, sourceCloseKey, stopCloseKey, stopKindFor, stopMoveLine, type StopKind } from "./texts";
 import { parseCommand } from "./intake";
 import { sourceActionKind, sourceSyncConfirmed, type SourceSyncStatus } from "./source-state";
 
@@ -48,8 +48,9 @@ export type CommandIn = {
   seq: number | null; at: number; reason: string; stopPrice: number | null; fraction: number | null;
   /** position_review (source's view of a position): its action / tracker status. */
   sourceAction?: string | null; trackerStatus?: string | null;
+  /** CAB: which rule closed the signal when it was booked as a stop loss (smart_cancel / max_age / stale_cancel). */
+  closedBy?: string | null;
 };
-
 
 type Runtime = { acct: Account; ex: BingX; locks: Map<string, Promise<unknown>>; hedge?: boolean };
 
@@ -989,11 +990,11 @@ export function createExecutor(deps: {
       if (t.status === "open") await replaceStop(rt, t, cmd.stopPrice, cmd.reason);
       else await updateTrade(t.id, { stop_price: cmd.stopPrice });
     } else if (cmd.type === "close" && (t.status === "unknown" || t.status === "opening")) {
-      await updateTrade(t.id, { pending_close_reason: `source:${cmd.reason || "close"}` }); // closed as soon as the entry is found
+      await updateTrade(t.id, { pending_close_reason: sourceCloseKey(cmd) }); // closed as soon as the entry is found
     } else if (cmd.type === "close") {
       const f = cmd.fraction ?? 1;
-      if (f >= 0.999 || !t.initial_qty) await closeMarket(rt, t, `source:${cmd.reason || "close"}`);
-      else await closeMarket(rt, t, `source:${cmd.reason || "close"}`, t.initial_qty * f);
+      if (f >= 0.999 || !t.initial_qty) await closeMarket(rt, t, sourceCloseKey(cmd));
+      else await closeMarket(rt, t, sourceCloseKey(cmd), t.initial_qty * f);
     }
     await done();
   }

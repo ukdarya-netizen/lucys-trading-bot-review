@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { closeLine, closeReasonText, isCancelReason, resultLine, stopCloseKey, stopKindFor, stopMoveLine } from "./texts";
+import { parseCommand } from "./intake";
+import { closeLine, closeReasonText, isCancelReason, resultLine, sourceCloseKey, stopCloseKey, stopKindFor, stopMoveLine } from "./texts";
 
 test("stop kind from who moved it and where it is", () => {
   assert.equal(stopKindFor("trailing", "long", 100, 110), "trailing");
@@ -64,4 +65,16 @@ test("result line spells out the sign; stop move lines", () => {
   assert.equal(stopMoveLine("trailing", 8, "nihilist"), "Трейлинг-стоп подтянут: +8.00% от входа — эта прибыль уже защищена");
   assert.equal(stopMoveLine("source", 3, "cab"), "CAB передвинул стоп в прибыль: +3.00% от входа");
   assert.equal(stopMoveLine("initial", -6, "cab"), "Стоп передвинут: −6.00% от входа");
+});
+
+test("CAB cancellation booked as a stop loss says it was a cancellation, and stays a loss", () => {
+  const key = sourceCloseKey({ reason: "stop_loss", closedBy: "smart_cancel" });
+  assert.equal(key, "source:stop_loss:smart_cancel");
+  assert.equal(closeLine(key, { source: "cab" }),
+    "Отмена: CAB отменил сигнал (smart cancel — разворот по спот CVD) — позиция закрыта по рынку. Убыток 5% и больше, поэтому CAB засчитал сделку как стоп-лосс");
+  assert.ok(!isCancelReason(key));
+  assert.equal(sourceCloseKey({ reason: "stop_loss", closedBy: null }), "source:stop_loss");
+  assert.equal(parseCommand({ commandId: "c1", sourceSignalId: "cab-signal-1", type: "close", reason: "stop_loss", closedBy: "smart_cancel" }, 0).ok, true);
+  const p = parseCommand({ commandId: "c1", sourceSignalId: "cab-signal-1", type: "close", reason: "stop_loss", closedBy: "x'; drop" }, 0);
+  assert.ok(p.ok && p.value.closedBy === null);
 });

@@ -86,6 +86,7 @@ export function parseCommand(b: any, now: number): Parsed<CommandIn> {
       at: Number.isFinite(atRaw) ? atRaw : now, reason: String(b.reason ?? type), stopPrice, fraction: b.partial === true || (f !== null && f < 1) ? f : null,
       sourceAction: typeof b.sourceAction === "string" ? b.sourceAction.slice(0, 40) : typeof b.action === "string" ? b.action.slice(0, 40) : null,
       trackerStatus: typeof b.trackerStatus === "string" ? b.trackerStatus.slice(0, 40) : typeof b.sourceStatus === "string" ? b.sourceStatus.slice(0, 40) : null,
+      closedBy: typeof b.closedBy === "string" && /^[a-z_]{1,40}$/.test(b.closedBy) ? b.closedBy : null,
     },
   };
 }

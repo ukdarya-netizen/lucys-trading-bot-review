@@ -206,7 +206,8 @@ export async function startExecutor(log: (msg: string, extra?: unknown) => void)
 const SOURCE_NAME: Record<string, string> = { cab: "CAB", nihilist: "Нигилист" };
 /** Owner 2026-11-09: closes caused by a source's cancellation (see texts.ts isCancelReason) — not a win or a loss. */
 const CANCEL_SQL = `coalesce(close_reason LIKE 'cancel:%' OR close_reason LIKE 'cancel\\_sync:%'
-  OR (close_reason LIKE 'source:%' AND substr(close_reason, 8) NOT IN ('stop_loss','expired','breakeven_stop','breakeven_close','trailing_stop','profit','core_exit','close','')), false)`;
+  OR (close_reason LIKE 'source:%' AND substr(close_reason, 8) NOT IN ('stop_loss','expired','breakeven_stop','breakeven_close','trailing_stop','profit','core_exit','close','')
+    AND close_reason NOT LIKE 'source:stop\\_loss:%'), false)`;
 const STATUS_TEXT: Record<string, string> = {
   opening: "открывается", open: "открыта", closing: "закрывается", closed: "закрыта",
   skipped: "не открыта", failed: "не открыта (ошибка)", unknown: "сверяется с биржей",
