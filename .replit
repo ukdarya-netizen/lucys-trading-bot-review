@@ -1,0 +1,32 @@
+modules = ["nodejs-24", "python-base-3.13", "postgresql-16"]
+
+[deployment]
+router = "application"
+deploymentTarget = "autoscale"
+
+[deployment.postBuild]
+args = ["pnpm", "store", "prune"]
+env = { "CI" = "true" }
+
+[workflows]
+runButton = "Project"
+
+[agent]
+stack = "PNPM_WORKSPACE"
+expertMode = true
+
+[postMerge]
+path = "scripts/post-merge.sh"
+timeoutMs = 20000
+
+[userenv]
+
+[userenv.shared]
+EXECUTOR_OWNER_VST = "0"
+EXECUTOR_SUBSCRIBERS = "0"
+EXECUTOR_V2 = "1"
+SUBSCRIBER_BOT_IN_DEV = "0"
+NIHILIST_POSITION_SYNC_URL = "https://crypto-nihillyst.replit.app/api/trading/position-sync"
+
+[nix]
+channel = "stable-25_05"

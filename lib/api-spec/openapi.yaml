@@ -15,6 +15,89 @@ tags:
   - name: journal
     description: Private owner-only trading journal
 paths:
+  /journal/subscribers/{id}/sources:
+    post:
+      operationId: setSubscriberSources
+      tags: [journal]
+      summary: Set the bots available to one subscriber
+      description: Owner-only. Updates a pending request before approval or changes an existing subscriber's bot access without changing global bot settings.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+            minimum: 1
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SubscriberSourcesInput"
+      responses:
+        "200":
+          description: Saved bot access
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SubscriberSourcesResult"
+        "400":
+          description: Invalid request
+        "401":
+          description: Sign-in required
+        "403":
+          description: Not the configured owner
+        "404":
+          description: Subscriber not found
+        "409":
+          description: Subscriber is not pending or approved
+  /journal/executor/trading-controls:
+    get:
+      operationId: getExecutorTradingControls
+      tags: [journal]
+      summary: Owner-only effective VST trading controls
+      responses:
+        "200":
+          description: Saved permissions and effective runtime state
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/ExecutorTradingControlState"
+        "401":
+          description: Sign-in required
+        "403":
+          description: Owner access required
+    post:
+      operationId: updateExecutorTradingControl
+      tags: [journal]
+      summary: Owner enables or pauses new VST entries without restarting the service
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ExecutorTradingControlInput"
+      responses:
+        "200":
+          description: Saved controls; existing positions remain managed
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/ExecutorTradingControlState"
+        "400":
+          description: Invalid control
+        "401":
+          description: Sign-in required
+        "403":
+          description: Owner access required
+        "409":
+          description: Cannot enable trading in this environment or configuration
+        "503":
+          description: Choice could not be saved
   /trading/reset:
     post:
       operationId: requestOwnerTradingReset
@@ -947,6 +1030,68 @@ components:
       schema:
         type: string
   schemas:
+    SubscriberSourcesInput:
+      type: object
+      additionalProperties: false
+      required: [sources]
+      properties:
+        sources:
+          type: array
+          minItems: 1
+          maxItems: 2
+          uniqueItems: true
+          items:
+            type: string
+            enum: [cab, nihilist]
+    SubscriberSourcesResult:
+      type: object
+      additionalProperties: false
+      required: [id, tradeSources]
+      properties:
+        id:
+          type: integer
+        tradeSources:
+          type: array
+          minItems: 1
+          maxItems: 2
+          uniqueItems: true
+          items:
+            type: string
+            enum: [cab, nihilist]
+    ExecutorTradingControlInput:
+      type: object
+      additionalProperties: false
+      required: [target, enabled]
+      properties:
+        target:
+          type: string
+          enum: [owner, subscribers]
+        enabled:
+          type: boolean
+    ExecutorTradingControlState:
+      type: object
+      required: [target, env, enabled, effective, canManage, canEnable, blockedReason, activeAccounts, startedAt]
+      properties:
+        target:
+          type: string
+          enum: [owner, subscribers]
+        env:
+          type: string
+          enum: [vst]
+        enabled:
+          type: boolean
+        effective:
+          type: boolean
+        canManage:
+          type: boolean
+        canEnable:
+          type: boolean
+        blockedReason:
+          type: [string, "null"]
+        activeAccounts:
+          type: integer
+        startedAt:
+          type: [string, "null"]
     OwnerTradingResetInput:
       type: object
       additionalProperties: false

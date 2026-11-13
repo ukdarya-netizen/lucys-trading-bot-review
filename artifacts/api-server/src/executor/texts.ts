@@ -66,9 +66,51 @@ const SOURCE_CLOSE_REASON: Record<string, string> = {
   close: "",
 };
 
+/** Close reasons of a real source exit (everything else a source sent was a cancellation). */
+const SOURCE_EXIT_KEYS = new Set(["stop_loss", "expired", "breakeven_stop", "breakeven_close", "trailing_stop", "profit", "core_exit", "close", ""]);
+
+/**
+ * Owner 2026-11-09: a cancellation of the signal by its source is a reason of its own — cancel:<reason>
+ * (cancel_sync:<status> when it was found by the position sync). Trades closed before this by a cancel
+ * command carry source:<reason> with a reason that is not an exit: they are recognised too.
+ */
+export const cancelKey = (reason: string | null | undefined, sync = false) =>
+  `${sync ? "cancel_sync" : "cancel"}:${String(reason || "cancelled").slice(0, 80)}`;
+export function isCancelReason(key: string | null | undefined): boolean {
+  if (!key) return false;
+  if (key.startsWith("cancel:") || key.startsWith("cancel_sync:")) return true;
+  if (!key.startsWith("source:")) return false;
+  const r = key.slice("source:".length);
+  return !SOURCE_EXIT_KEYS.has(r) && !r.startsWith("stop_loss:");
+}
+
+/**
+ * Owner 2026-11-10 (HANA): CAB books a cancellation (smart cancel / max-age / stale) at ≥5% loss as a stop
+ * loss. It is still a real loss, but the text must say what happened: source:stop_loss:<rule>.
+ */
+export const sourceCloseKey = (cmd: { reason: string; closedBy?: string | null }) =>
+  cmd.reason === "stop_loss" && cmd.closedBy ? `source:stop_loss:${cmd.closedBy}` : `source:${cmd.reason || "close"}`;
+
+/** CAB rules that cancel a signal; at ≥5% loss CAB books the cancellation as a stop loss. */
+const EARLY_CLOSE: Record<string, string> = {
+  smart_cancel: "smart cancel — разворот по спот CVD",
+  max_age: "max-age — цена не выросла за отведённое время",
+  stale_cancel: "stale cancel — сигнал не отработал",
+};
+const cancelWhy = (r: string) => (/reclass|neutral/i.test(r) ? "переклассифицировал сигнал" : r === "removed" ? "удалил сигнал" : "отменил сигнал");
+
 /** One line: how the position was closed. Keys: close_reason of ex_trades. */
 export function closeLine(key: string, ctx: { source: string; takePct?: number | null } = { source: "" }): string {
   const src = SOURCE_NAME[ctx.source] ?? "Источник";
+  if (isCancelReason(key)) {
+    const sync = key.startsWith("cancel_sync:");
+    const r = key.slice(key.indexOf(":") + 1);
+    return `Отмена: ${src} ${sync ? "уже " : ""}${cancelWhy(r)}${sync ? " (найдено при сверке)" : ""} — позиция закрыта по рынку`;
+  }
+  if (key.startsWith("source:stop_loss:")) {
+    const rule = key.slice("source:stop_loss:".length);
+    return `Отмена: ${src} отменил сигнал (${EARLY_CLOSE[rule] ?? rule}) — позиция закрыта по рынку. Убыток 5% и больше, поэтому ${src} засчитал сделку как стоп-лосс`;
+  }
   if (key.startsWith("source:")) {
     const r = key.slice("source:".length);
     const why = SOURCE_CLOSE_REASON[r];

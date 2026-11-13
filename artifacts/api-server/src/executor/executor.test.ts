@@ -10,11 +10,13 @@ import { createBingX } from "./bingx";
 import type { Account } from "./accounts";
 import { createExecutor } from "./engine";
 import { createFakeBingX } from "./fake-bingx";
+import { syncSource } from "./index";
 import { parseCommand, parseSignal } from "./intake";
 import { resolveStrategy, topUpAmount } from "./plan";
 import { ensureExecutorTables } from "./store";
+import type { SourceSyncStatus } from "./source-state";
 
-const fake = createFakeBingX({ equity: 10_000, prices: { "BIRB-USDT": 100, "IDOL-USDT": 2, "BTC-USDT": 60000, "ZZZ-USDT": 100, "YYY-USDT": 100, "AAA-USDT": 100, "CCC-USDT": 100, "MOG-USDT": 0.0000005 } });
+const fake = createFakeBingX({ equity: 10_000, prices: { "BIRB-USDT": 100, "IDOL-USDT": 2, "BTC-USDT": 60000, "ZZZ-USDT": 100, "YYY-USDT": 100, "AAA-USDT": 100, "CCC-USDT": 100, "RECON-USDT": 100, "MOG-USDT": 0.0000005, "CNA-USDT": 100, "CNB-USDT": 100, "CNC-USDT": 100, "CND-USDT": 100, "MRG-USDT": 100, "PRV-USDT": 100, "PRW-USDT": 100 } });
 let host = "";
 const sent: string[] = [];
 let strategy = resolveStrategy({ strategy: "take5" });
@@ -29,6 +31,7 @@ before(async () => {
   await ensureExecutorTables();
   ex = createExecutor({
     loadAccounts: async () => [account()],
+    entryAllowed: async () => true,
     bingx: (a) => createBingX({ env: a.env, key: a.key, secret: a.secret, host }),
     send: async (t) => { sent.push(t); },
   });
@@ -157,87 +160,102 @@ test("refusals: stale, price already beyond the stop, one position per symbol; f
   strategy = resolveStrategy({ strategy: "take5" });
 });
 
-test("source cancellation closes the confirmed side and preserves opposite-side protection", async () => {
+test("source cancellation closes only the confirmed side and preserves opposite-side protection", async () => {
   fake.setPrice("BIRB-USDT", 100);
   await ex.onSignal(sig(63, "BIRBUSDT", 91));
-  const short = parseSignal({ sourceSignalId: "cab-signal-64", patternId: "liquidation_cascade", confirmationStatus: "confirmed",
-    signalAt: new Date().toISOString(), symbol: "BIRBUSDT", side: "sell", orderType: "market", quantity: "1", referencePrice: "100", stopLoss: "109" }, "cab", Date.now());
+  const short = parseSignal({
+    sourceSignalId: "cab-signal-64", patternId: "liquidation_cascade", confirmationStatus: "confirmed",
+    signalAt: new Date().toISOString(), symbol: "BIRBUSDT", side: "sell", orderType: "market", quantity: "1",
+    referencePrice: "100", stopLoss: "109",
+  }, "cab", Date.now());
   assert.ok(short.ok, JSON.stringify(short));
   await ex.onSignal(short.value);
   assert.equal((await trade(64)).status, "open");
-  const marketOrdersBefore = fake.calls.filter((call) => call.path === "/openApi/swap/v2/trade/order" && call.params.type === "MARKET").length;
+  const marketOrdersBefore = fake.calls.filter((call) =>
+    call.path === "/openApi/swap/v2/trade/order" && call.params.type === "MARKET",
+  ).length;
 
-  const cancel = parseCommand({ commandId: "c63-cancel", sourceSignalId: "cab-signal-63", symbol: "BIRBUSDT", type: "cancel_entry", eventSeq: 1,
-    eventAt: new Date().toISOString(), reason: "source_cancelled" }, Date.now());
+  const cancel = parseCommand({
+    commandId: "c63-cancel", sourceSignalId: "cab-signal-63", symbol: "BIRBUSDT", type: "cancel_entry",
+    eventSeq: 1, eventAt: new Date().toISOString(), reason: "source_cancelled",
+  }, Date.now());
   assert.ok(cancel.ok);
+  fake.rateLimit("/openApi/swap/v2/trade/order", 1);
   await ex.onCommand(cancel.value);
   assert.equal((await trade(63)).status, "closed");
-  assert.equal((await trade(64)).status, "open", "the opposite position remains open");
-  assert.equal(fake.calls.filter((call) => call.path === "/openApi/swap/v2/trade/order" && call.params.type === "MARKET").length, marketOrdersBefore + 1);
-  assert.equal(fake.orders.filter((order) => order.symbol === "BIRB-USDT" && order.positionSide === "SHORT" && order.type === "STOP_MARKET" && order.status === "NEW").length, 1,
-    "the opposite side's stop must remain in place");
-  const review = await pool.query("SELECT detail FROM ex_events WHERE trade_id = $1 AND kind = 'source_position_review'", [(await trade(63)).id]);
-  assert.equal(review.rowCount, 1);
-  assert.equal(review.rows[0]!.detail.exchangeState, "open");
-  assert.equal(review.rows[0]!.detail.closeRequested, true);
-  const cleanup = parseCommand({ commandId: "c64-cleanup", sourceSignalId: "cab-signal-64", symbol: "BIRBUSDT", type: "close", eventSeq: 1,
-    eventAt: new Date().toISOString(), reason: "test_cleanup" }, Date.now());
+  assert.equal((await trade(64)).status, "open", "opposite-side position remains open");
+  assert.equal(fake.calls.filter((call) =>
+    call.path === "/openApi/swap/v2/trade/order" && call.params.type === "MARKET",
+  ).length, marketOrdersBefore + 1);
+  assert.equal(newOrders("BIRB-USDT", "STOP_MARKET").filter((order) => order.positionSide === "SHORT").length, 1);
+  const cleanup = parseCommand({
+    commandId: "c64-cleanup", sourceSignalId: "cab-signal-64", symbol: "BIRBUSDT", type: "close",
+    eventSeq: 1, eventAt: new Date().toISOString(), reason: "test_cleanup",
+  }, Date.now());
   assert.ok(cleanup.ok);
   await ex.onCommand(cleanup.value);
   assert.equal((await trade(64)).status, "closed");
 });
 
-test("cancelled position_review closes; reclassified position_review only observes", async () => {
+test("cancelled position_review closes; reclassified review closes too (owner 2026-11-09: a neutral close in CAB closes the position)", async () => {
   fake.setPrice("ZZZ-USDT", 100);
   await ex.onSignal(sig(65, "ZZZUSDT", 91));
-  const reviewCancelled = parseCommand({ commandId: "c65-review", sourceSignalId: "cab-signal-65", symbol: "ZZZUSDT", type: "position_review", eventSeq: 1,
-    eventAt: new Date().toISOString(), reason: "source_cancelled", action: "review", sourceStatus: "cancelled", closePosition: false }, Date.now());
-  assert.ok(reviewCancelled.ok);
-  assert.equal(reviewCancelled.value.trackerStatus, "cancelled");
-  await ex.onCommand(reviewCancelled.value);
+  const cancelled = parseCommand({
+    commandId: "c65-review", sourceSignalId: "cab-signal-65", symbol: "ZZZUSDT", type: "position_review",
+    eventSeq: 1, eventAt: new Date().toISOString(), reason: "source_cancelled", action: "review",
+    sourceStatus: "cancelled", closePosition: false,
+  }, Date.now());
+  assert.ok(cancelled.ok);
+  assert.equal(cancelled.value.trackerStatus, "cancelled");
+  await ex.onCommand(cancelled.value);
   assert.equal((await trade(65)).status, "closed");
-  const marketAfterCancel = fake.calls.filter((call) => call.path === "/openApi/swap/v2/trade/order" && call.params.type === "MARKET").length;
+  assert.equal((await trade(65)).close_reason, "cancel:cancelled");
 
   fake.setPrice("YYY-USDT", 100);
   await ex.onSignal(sig(66, "YYYUSDT", 91));
-  const openedReview = await trade(66);
-  const reclassified = parseCommand({ commandId: "c66-review", sourceSignalId: "cab-signal-66", symbol: "YYYUSDT", type: "position_review", eventSeq: 1,
-    eventAt: new Date().toISOString(), reason: "reclassified", action: "review", trackerStatus: "reclassified" }, Date.now());
+  const reclassified = parseCommand({
+    commandId: "c66-review", sourceSignalId: "cab-signal-66", symbol: "YYYUSDT", type: "position_review",
+    eventSeq: 1, eventAt: new Date().toISOString(), reason: "reclassified", action: "review",
+    trackerStatus: "reclassified",
+  }, Date.now());
   assert.ok(reclassified.ok);
   await ex.onCommand(reclassified.value);
-  assert.equal((await trade(66)).status, "open");
-  assert.equal(fake.calls.filter((call) => call.path === "/openApi/swap/v2/trade/order" && call.params.type === "MARKET").length, marketAfterCancel,
-    "reclassification alone must not close a position");
-  const events = await pool.query("SELECT detail FROM ex_events WHERE trade_id = $1 AND kind = 'source_position_review'", [openedReview.id]);
-  assert.equal(events.rowCount, 1);
-  assert.equal(events.rows[0]!.detail.closeRequested, false);
-  const cleanup = parseCommand({ commandId: "c66-cleanup", sourceSignalId: "cab-signal-66", symbol: "YYYUSDT", type: "close", eventSeq: 2,
-    eventAt: new Date().toISOString(), reason: "test_cleanup" }, Date.now());
-  assert.ok(cleanup.ok);
-  await ex.onCommand(cleanup.value);
   assert.equal((await trade(66)).status, "closed");
+  assert.equal((await trade(66)).close_reason, "cancel:reclassified");
 });
+
 test("repeated cancellation does not postpone a pending BingX close retry", async () => {
   fake.setPrice("AAA-USDT", 100);
   await ex.onSignal(sig(67, "AAAUSDT", 91));
   const opened = await trade(67);
-  const marketOrdersBefore = fake.calls.filter((call) => call.path === "/openApi/swap/v2/trade/order" && call.params.type === "MARKET").length;
-  await pool.query("UPDATE ex_trades SET status = 'closing', pending_close_reason = 'source:source_cancelled' WHERE id = $1", [opened.id]);
+  const marketOrdersBefore = fake.calls.filter((call) =>
+    call.path === "/openApi/swap/v2/trade/order" && call.params.type === "MARKET",
+  ).length;
+  await pool.query(
+    "UPDATE ex_trades SET status = 'closing', pending_close_reason = 'source:source_cancelled' WHERE id = $1",
+    [opened.id],
+  );
   const pending = await trade(67);
   assert.equal(pending.status, "closing");
-  const retryAt = pending.updated_at.getTime();
+  const retryAt = new Date(pending.updated_at).getTime();
 
-  const repeated = parseCommand({ commandId: "c67-cancel-1", sourceSignalId: "cab-signal-67", symbol: "AAAUSDT", type: "cancel_entry", eventSeq: 1,
-    eventAt: new Date().toISOString(), reason: "source_cancelled" }, Date.now());
+  const repeated = parseCommand({
+    commandId: "c67-cancel-1", sourceSignalId: "cab-signal-67", symbol: "AAAUSDT", type: "cancel_entry",
+    eventSeq: 1, eventAt: new Date().toISOString(), reason: "source_cancelled",
+  }, Date.now());
   assert.ok(repeated.ok);
   await ex.onCommand(repeated.value);
-  assert.equal((await trade(67)).updated_at.getTime(), retryAt, "recording a later command must not reset close retry timing");
-  assert.equal(fake.calls.filter((call) => call.path === "/openApi/swap/v2/trade/order" && call.params.type === "MARKET").length, marketOrdersBefore);
+  assert.equal(new Date((await trade(67)).updated_at).getTime(), retryAt);
+  assert.equal(fake.calls.filter((call) =>
+    call.path === "/openApi/swap/v2/trade/order" && call.params.type === "MARKET",
+  ).length, marketOrdersBefore, "no duplicate market order during the retry window");
 
   await pool.query("UPDATE ex_trades SET updated_at = now() - interval '61 seconds' WHERE id = $1", [opened.id]);
   await ex.reconcileAll();
   assert.equal((await trade(67)).status, "closed");
-  assert.equal(fake.calls.filter((call) => call.path === "/openApi/swap/v2/trade/order" && call.params.type === "MARKET").length, marketOrdersBefore + 1);
+  assert.equal(fake.calls.filter((call) =>
+    call.path === "/openApi/swap/v2/trade/order" && call.params.type === "MARKET",
+  ).length, marketOrdersBefore + 1);
 });
 
 test("restart in the middle of an entry: the reconciler adopts the exchange position and protects it", async () => {
@@ -257,6 +275,34 @@ test("restart in the middle of an entry: the reconciler adopts the exchange posi
   assert.ok(c.ok);
   await ex.onCommand(c.value);
   assert.equal((await trade(7)).status, "closed");
+});
+
+test("liquidation drifts to the stop while open (funding ate the margin): the reconciler adds margin and says so", async () => {
+  fake.setPrice("BIRB-USDT", 100);
+  await ex.onSignal(sig(41, "BIRBUSDT", 91));
+  const t0 = await trade(41);
+  assert.equal(t0.status, "open", JSON.stringify(t0));
+  const before = Number(t0.margin_added);
+  // Funding takes 6 USDT of the isolated margin: liquidation moves up past the 91 stop.
+  fake.drainMargin("BIRB-USDT", "LONG", 6);
+  assert.ok(fake.liq("BIRB-USDT", "LONG")! > 91 - 0.5, `liquidation ${fake.liq("BIRB-USDT", "LONG")} near/above the stop`);
+  sent.length = 0;
+  await ex.reconcileAll();
+  const t1 = await trade(41);
+  assert.equal(t1.status, "open");
+  assert.ok(Number(t1.margin_added) > before, "margin added while open");
+  assert.ok(fake.liq("BIRB-USDT", "LONG")! < 91, `liquidation ${fake.liq("BIRB-USDT", "LONG")} back beyond the stop`);
+  assert.match(sent.join("\n"), /Ликвидация подошла к стопу/);
+  // Nothing more to add on the next pass.
+  sent.length = 0;
+  await ex.reconcileAll();
+  assert.equal(Number((await trade(41)).margin_added), Number(t1.margin_added));
+  assert.doesNotMatch(sent.join("\n"), /Ликвидация подошла к стопу/);
+  // Leave the fake exchange flat for the next tests: the +5% take fills.
+  fake.setPrice("BIRB-USDT", 106);
+  await ex.reconcileAll();
+  assert.equal((await trade(41)).status, "closed");
+  fake.setPrice("BIRB-USDT", 100);
 });
 
 test("top-up math: liquidation of a 10x long at −9.5% vs a 9% stop needs margin; a 5% stop needs none", () => {
@@ -314,8 +360,16 @@ test("Nihilist sync: a missed trailing move is applied to a short, a missed clos
   answer = "down";
   await assert.rejects(readSourceSync("nihilist", 11, fetchImpl));
   assert.equal((await pool.query("SELECT status FROM ex_trades WHERE source_signal_id = 'nh-signal-12'")).rows[0].status, "open");
-  answer = { positions: [{ sourceSignalId: "nh-signal-12", sourceAction: "close", sourceStopLossPrice: 1.7 }], nextAfterId: null };
-  await ex.onSourceState(await readSourceSync("nihilist", 11, fetchImpl));
+  answer = { positions: [{ sourceSignalId: "nh-signal-12", sourceAction: "review", sourceStatus: "cancelled", sourceStopLossPrice: 1.7 }], nextAfterId: null };
+  const sourceStatus: Record<"cab" | "nihilist", SourceSyncStatus> = {
+    cab: { at: null, ok: null, error: null },
+    nihilist: { at: null, ok: null, error: null },
+  };
+  await syncSource(ex, "nihilist", {
+    read: async (source, after) => readSourceSync(source, after, fetchImpl),
+    status: sourceStatus,
+  });
+  assert.equal(sourceStatus.nihilist.ok, true);
   const done = (await pool.query("SELECT * FROM ex_trades WHERE source_signal_id = 'nh-signal-12'")).rows[0];
   assert.equal(done.status, "closed");
   assert.ok(Number(done.pnl) > 0);
@@ -333,14 +387,9 @@ const nhCmd = (id: number, seq: number, type: "move_stop" | "close", extra: Reco
   assert.ok(c.ok); return c.value;
 };
 
-test("Nihilist settings: off → not opened (no Telegram); own size in USDT; subscribers excluded by default", async () => {
+test("Nihilist allocation and strategy come from its source settings", async () => {
   const { saveSourceSettings } = await import("./store");
-  await saveSourceSettings({ source: "nihilist", enabled: false, allocationMode: "amount", allocationValue: 50, strategy: "source", subscribers: false });
   fake.setPrice("BIRB-USDT", 100);
-  await ex.onSignal(nhSignal(31, "BIRBUSDT", "long", 100, 90));
-  const off = await nhTrade(31);
-  assert.equal(off.status, "skipped"); assert.equal(off.reason, "source_disabled");
-  assert.equal(sent.length, 0);
   await saveSourceSettings({ source: "nihilist", enabled: true, allocationMode: "amount", allocationValue: 50, strategy: "source", subscribers: false });
   await ex.onSignal(nhSignal(32, "BIRBUSDT", "long", 100, 90));
   const t = await nhTrade(32);
@@ -413,12 +462,8 @@ test("Bitcoin: 50x by default for CAB and Nihilist, own size and leverage per so
   await pool.query("DELETE FROM ex_btc_settings");
 });
 
-test("CAB settings apart from Nihilist: CAB off → not opened; CAB size from its own settings", async () => {
+test("CAB size comes from its own source settings", async () => {
   const { saveSourceSettings } = await import("./store");
-  await saveSourceSettings({ source: "cab", enabled: false, allocationMode: "percent", allocationValue: 1, strategy: "source", subscribers: true });
-  fake.setPrice("BIRB-USDT", 100);
-  await ex.onSignal(sig(71, "BIRBUSDT", 91));
-  assert.equal((await trade(71)).reason, "source_disabled");
   await saveSourceSettings({ source: "cab", enabled: true, allocationMode: "amount", allocationValue: 40, strategy: "source", subscribers: true });
   await ex.onSignal(sig(72, "BIRBUSDT", 91));
   const t = await trade(72);
@@ -508,6 +553,142 @@ test("a reconcile pass asks BingX for open orders once for all symbols (not once
   assert.equal(asked[0]!.params.symbol, undefined);
 });
 
+test("source-sync failures and unsettled trades never report a match; three fresh clean passes confirm recovery once", async (t) => {
+  const reconciliationFake = createFakeBingX({ equity: 10_000, prices: { "RECON-USDT": 100 } });
+  const reconciliationHost = await reconciliationFake.start();
+  t.after(async () => { await reconciliationFake.stop(); });
+  let reconciliationNow = Date.now();
+  const sourceStatus: Record<"cab" | "nihilist", SourceSyncStatus> = {
+    cab: { at: null, ok: null, error: null },
+    nihilist: { at: null, ok: null, error: null },
+  };
+  const reconciler = createExecutor({
+    loadAccounts: async () => [account()],
+    entryAllowed: async () => true,
+    bingx: (a) => createBingX({ env: a.env, key: a.key, secret: a.secret, host: reconciliationHost }),
+    send: async (text) => { sent.push(text); },
+    sourceSyncStatus: (source) => sourceStatus[source as "cab" | "nihilist"],
+    now: () => reconciliationNow,
+  });
+  const signalId = 20001;
+  reconciliationFake.setPrice("RECON-USDT", 100);
+  await reconciler.onSignal(sig(signalId, "RECONUSDT", 91));
+  sent.length = 0;
+  const hasMatchNotice = () => sent.some((text) => text.includes("Сверка подтверждена"));
+  const reconcileWith = async (
+    read: () => Promise<Array<{ sourceSignalId: string; action: string; stop: number | null }>>,
+    expectedError: RegExp,
+  ) => {
+    await assert.rejects(
+      syncSource(reconciler, "cab", {
+        read: async () => read(),
+        status: sourceStatus,
+        now: () => reconciliationNow,
+      }),
+      expectedError,
+    );
+    assert.equal(sourceStatus.cab.ok, false);
+    await reconciler.reconcileAll();
+    assert.equal(hasMatchNotice(), false, "an unconfirmed source sync must not produce a match notice");
+  };
+
+  await reconcileWith(async () => { throw new Error("timeout"); }, /timeout/);
+  await reconcileWith(
+    async () => [{ sourceSignalId: `cab-signal-${signalId}`, action: "future_action", stop: null }],
+    /unrecognized action/,
+  );
+  await reconcileWith(async () => [], /omitted 1 active signal/);
+
+  sourceStatus.cab = { at: reconciliationNow, ok: true, error: null };
+  let resolveRead!: (states: Array<{ sourceSignalId: string; action: string; stop: number | null }>) => void;
+  let readStarted!: () => void;
+  const sourceReadStarted = new Promise<void>((resolve) => { readStarted = resolve; });
+  const inFlightSync = syncSource(reconciler, "cab", {
+    read: async () => {
+      readStarted();
+      return new Promise((resolve) => { resolveRead = resolve; });
+    },
+    status: sourceStatus,
+    now: () => reconciliationNow,
+  });
+  await sourceReadStarted;
+  assert.equal(sourceStatus.cab.ok, false, "a new source poll immediately invalidates the prior successful snapshot");
+  await reconciler.reconcileAll();
+  assert.equal(hasMatchNotice(), false, "a match notice is blocked while the source poll is in flight");
+  resolveRead([{ sourceSignalId: `cab-signal-${signalId}`, action: "active", stop: null }]);
+  await inFlightSync;
+
+  await pool.query("UPDATE ex_trades SET status = 'closing' WHERE source_signal_id = $1", [`cab-signal-${signalId}`]);
+  await syncSource(reconciler, "cab", {
+    read: async () => [{ sourceSignalId: `cab-signal-${signalId}`, action: "active", stop: null }],
+    status: sourceStatus,
+    now: () => reconciliationNow,
+  });
+  await reconciler.reconcileAll();
+  assert.equal(hasMatchNotice(), false, "a trade still in closing must not produce a match notice");
+
+  await pool.query("UPDATE ex_trades SET status = 'open' WHERE source_signal_id = $1", [`cab-signal-${signalId}`]);
+  for (let pass = 0; pass < 3; pass++) {
+    reconciliationNow += 15_001;
+    await syncSource(reconciler, "cab", {
+      read: async () => [{ sourceSignalId: `cab-signal-${signalId}`, action: "active", stop: null }],
+      status: sourceStatus,
+      now: () => reconciliationNow,
+    });
+    await reconciler.reconcileAll();
+    assert.equal(sent.filter((text) => text.includes("Сверка подтверждена")).length, pass === 2 ? 1 : 0);
+  }
+  await reconciler.reconcileAll();
+  assert.equal(sent.filter((text) => text.includes("Сверка подтверждена")).length, 1, "a matched account is notified only once");
+
+  reconciliationFake.setPrice("RECON-USDT", 90);
+  await reconciler.reconcileAll();
+});
+
+test("an empty VST account cannot announce a match while another owner account has an unverified source", async (t) => {
+  const reconciliationFake = createFakeBingX({ equity: 10_000, prices: {} });
+  const reconciliationHost = await reconciliationFake.start();
+  t.after(async () => { await reconciliationFake.stop(); });
+  await pool.query(
+    `INSERT INTO ex_trades
+      (account_id, source, source_signal_id, symbol, side, pattern, env, status, signal_at, received_at, opened_at)
+     VALUES ('owner-real', 'cab', 'cab-signal-20901', 'ANIMEUSDT', 'long', 'impulse_buy', 'real', 'open', now(), now(), now())`,
+  );
+  const sourceStatus: Record<"cab" | "nihilist", SourceSyncStatus> = {
+    cab: { at: Date.now(), ok: false, error: "cancellation/reclassification requires review" },
+    nihilist: { at: Date.now(), ok: true, error: null },
+  };
+  const notices: string[] = [];
+  const reconciler = createExecutor({
+    loadAccounts: async () => [account()],
+    entryAllowed: async () => true,
+    bingx: (a) => createBingX({ env: a.env, key: a.key, secret: a.secret, host: reconciliationHost }),
+    send: async (text) => { notices.push(text); },
+    sourceSyncStatus: (source) => sourceStatus[source as "cab" | "nihilist"],
+  });
+  await reconciler.reconcileAll();
+  assert.equal(notices.some((text) => text.includes("Сверка подтверждена")), false);
+});
+
+test("a burst of signals asks BingX for open orders once (one shared request), and accounts on one key share the rate block", async () => {
+  const a = createBingX({ env: "vst", key: "burst-key", secret: "s", host });
+  const b = createBingX({ env: "real", key: "burst-key", secret: "s", host });
+  // Five symbols asked at the same moment → one request for the whole account.
+  const before = fake.calls.length;
+  await Promise.all(["BIRBUSDT", "IDOLUSDT", "ZZZUSDT", "YYYUSDT", "AAAUSDT"].map((sym) => a.openOrders(sym, "protect")));
+  const asked = fake.calls.slice(before).filter((c) => c.path === "/openApi/swap/v2/trade/openOrders");
+  assert.equal(asked.length, 1, JSON.stringify(asked));
+  // BingX blocks positions for ~300 ms after refusing account A: account B (same key) waits for the
+  // unblock instead of firing into the block.
+  fake.rateLimit("/openApi/swap/v2/user/positions", 1);
+  const t0 = Date.now();
+  const pa = a.positions(undefined, "protect");
+  await new Promise((r) => setTimeout(r, 60));
+  const tb = b.positions(undefined, "protect").then(() => Date.now() - t0);
+  await pa;
+  assert.ok((await tb) >= 250, `B waited for the shared block (${await tb} ms)`);
+});
+
 test("another number of zeros on BingX: CAB's 1000000MOG trades as BingX's MOG with the stop rescaled; later stop moves are rescaled too; a coin BingX does not list is skipped with the reason", async () => {
   fake.setPrice("MOG-USDT", 0.0000005); // source quotes 1 000 000 MOG at 0.5
   await ex.onSignal(sig(191, "1000000MOGUSDT", 0.45, Date.now(), 0.5));
@@ -534,4 +715,83 @@ test("a burst hits BingX's limit on positions several times in a row: the entry 
   assert.equal(t.status, "open", JSON.stringify(t));
   assert.ok(!sent.some((m) => m.includes("прервалась")));
   assert.equal(sent.filter((m) => m.includes("Открыт лонг") && m.includes("AAA")).length, 1);
+});
+
+// ---------------- owner 2026-11-09: cancellations, lost commands, margin refused ----------------
+const cancelCmd = (n: number, symbol: string, reason: string, seq = 1) => ({
+  commandId: `cab-cmd-${n}-${seq}`, sourceSignalId: `cab-signal-${n}`, symbol, type: "cancel_entry", eventSeq: seq,
+  eventAt: new Date().toISOString(), reason, source: "CryptoAltBullet",
+});
+
+test("CAB cancels an open signal: closed by market and booked as a cancellation, not as a close", async () => {
+  fake.setPrice("CNA-USDT", 100);
+  await ex.onSignal(sig(301, "CNAUSDT", 91, Date.now(), 100));
+  assert.equal((await trade(301)).status, "open");
+  const c = parseCommand(cancelCmd(301, "CNAUSDT", "abneon_gate_neutral_close_20261107"), Date.now());
+  assert.ok(c.ok);
+  await ex.onCommand(c.value);
+  const t = await trade(301);
+  assert.equal(t.status, "closed", JSON.stringify(t));
+  assert.equal(t.close_reason, "cancel:abneon_gate_neutral_close_20261107");
+  assert.equal(fake.positions.filter((p) => p.symbol === "CNA-USDT" && p.qty > 0).length, 0);
+  assert.match(sent.at(-1)!, /Отмена: CAB переклассифицировал сигнал — позиция закрыта по рынку/);
+});
+
+test("a cancellation that came but was never applied (lost to an error) is applied from the inbox by the reconcile pass", async () => {
+  fake.setPrice("CNB-USDT", 100);
+  await ex.onSignal(sig(302, "CNBUSDT", 91, Date.now(), 100));
+  assert.equal((await trade(302)).status, "open");
+  // Stored by the intake, but the executor never applied it.
+  await pool.query("INSERT INTO ex_inbox (kind, message_id, source_signal_id, body) VALUES ('command', $1, 'cab-signal-302', $2)",
+    ["cmd:cab-cmd-302-1", JSON.stringify(cancelCmd(302, "CNBUSDT", "cancelled"))]);
+  await ex.reconcileAll();
+  const t = await trade(302);
+  assert.equal(t.status, "closed", JSON.stringify(t));
+  assert.equal(t.close_reason, "cancel:cancelled");
+  assert.equal(t.last_command_seq, 1);
+  const ev = await pool.query("SELECT 1 FROM ex_events WHERE trade_id = $1 AND kind = 'command_replayed'", [t.id]);
+  assert.equal(ev.rowCount, 1);
+  // A second pass does nothing more.
+  await ex.reconcileAll();
+  assert.equal((await pool.query("SELECT 1 FROM ex_events WHERE trade_id = $1 AND kind = 'command_replayed'", [t.id])).rowCount, 1);
+});
+
+test("position sync: a signal CAB reclassified (sent as «review») is closed as a cancellation found by the sync", async () => {
+  fake.setPrice("CNC-USDT", 100);
+  await ex.onSignal(sig(303, "CNCUSDT", 91, Date.now(), 100));
+  assert.equal((await trade(303)).status, "open");
+  await ex.onSourceState([{ sourceSignalId: "cab-signal-303", action: "review", stop: 91, status: "reclassified", cancelReason: "ib_price24h_below_15" }]);
+  const t = await trade(303);
+  assert.equal(t.status, "closed", JSON.stringify(t));
+  assert.equal(t.close_reason, "cancel_sync:reclassified");
+  assert.match(sent.at(-1)!, /Отмена: CAB уже переклассифицировал сигнал \(найдено при сверке\)/);
+  // A signal still held by CAB is not touched.
+  fake.setPrice("CND-USDT", 100);
+  await ex.onSignal(sig(304, "CNDUSDT", 91, Date.now(), 100));
+  await ex.onSourceState([{ sourceSignalId: "cab-signal-304", action: "hold", stop: 91, status: "active" }]);
+  assert.equal((await trade(304)).status, "open");
+});
+
+test("the position opened but BingX refuses the margin top-up: the position is closed, not left with liquidation before the stop", async () => {
+  fake.setPrice("MRG-USDT", 100);
+  fake.rejectMargin(5);
+  await ex.onSignal(sig(305, "MRGUSDT", 91, Date.now(), 100));
+  const t = await trade(305);
+  assert.equal(t.status, "closed", JSON.stringify(t));
+  assert.equal(t.close_reason, "no_margin_for_stop");
+  assert.ok(sent.some((m) => m.includes("BingX не принял доливку маржи")));
+  assert.equal(fake.positions.filter((p) => p.symbol === "MRG-USDT" && p.qty > 0).length, 0);
+  fake.rejectMargin(0);
+});
+
+test("position_review: cancelled / reclassified closes as a cancellation; a plain review only observes", async () => {
+  fake.setPrice("PRV-USDT", 100); fake.setPrice("PRW-USDT", 100);
+  await ex.onSignal(sig(311, "PRVUSDT", 91, Date.now(), 100));
+  await ex.onSignal(sig(312, "PRWUSDT", 91, Date.now(), 100));
+  const review = (n: number, symbol: string, trackerStatus: string) => parseCommand({ commandId: `rv-${n}`, sourceSignalId: `cab-signal-${n}`, symbol,
+    type: "position_review", eventSeq: 1, eventAt: new Date().toISOString(), reason: "review", trackerStatus }, Date.now());
+  const a = review(311, "PRVUSDT", "reclassified"); assert.ok(a.ok); await ex.onCommand(a.value);
+  const b = review(312, "PRWUSDT", "active"); assert.ok(b.ok); await ex.onCommand(b.value);
+  assert.equal((await trade(311)).close_reason, "cancel:reclassified");
+  assert.equal((await trade(312)).status, "open");
 });

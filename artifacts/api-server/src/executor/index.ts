@@ -8,11 +8,18 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import { pool } from "@workspace/db";
 import { createBingX } from "./bingx";
 import { loadAccounts } from "./accounts";
+import { createPaperFetch } from "./paper";
+import { accountEntryAllowed } from "./trading-controls";
+
+/** One simulated exchange for the PAPER account (its state lives in ex_paper_state). */
+let paperFetch: ReturnType<typeof createPaperFetch> | null = null;
 import { REASON_TEXT, createExecutor, type Executor } from "./engine";
-import { closeReasonText } from "./texts";
+import { closeReasonText, isCancelReason } from "./texts";
 import { createIntakeHandler } from "./intake";
 import { BTC_MAX_LEVERAGE, ensureExecutorTables, getBtcSettings, getSourceSettings, saveSourceSettings, type SourceSettings } from "./store";
 import { nihilistStrategies, nihilistStrategy } from "./plan";
+import { getNihilistSettings } from "./nihilist-settings";
+import { missingSourceSignals, sourceActionKind, type SourceSyncStatus } from "./source-state";
 import { pumpTelegram, telegramOutboxStatus, telegramSender } from "./telegram";
 
 export const executorEnabled = () => process.env.EXECUTOR_V2 === "1";
@@ -22,7 +29,7 @@ let executor: Executor | null = null;
 let syncState: Record<string, { at: number | null; ok: boolean | null; error: string | null }> = {};
 // Bot Health (owner 2026-11-03): when the executor started and how the last reconcile pass went.
 let startedAt: number | null = null;
-const lastReconcile: { at: number | null; ms: number | null; ok: boolean | null; error: string | null } = { at: null, ms: null, ok: null, error: null };
+const lastReconcile: { at: number | null; ms: number | null; ok: boolean | null; error: string | null; accounts: Array<{ id: string; label: string; ok: boolean; error: string | null }> } = { at: null, ms: null, ok: null, error: null, accounts: [] };
 let handler: ((req: IncomingMessage, res: ServerResponse) => Promise<void>) | null = null;
 
 export function executorRequestHandler(req: IncomingMessage, res: ServerResponse): void {
@@ -30,8 +37,8 @@ export function executorRequestHandler(req: IncomingMessage, res: ServerResponse
   void handler(req, res);
 }
 
-export type SourceState = { sourceSignalId: string; action: string; stop: number | null };
-type SyncSource = "cab" | "nihilist";
+export type SourceState = { sourceSignalId: string; action: string; stop: number | null; status?: string | null; cancelReason?: string | null };
+export type SyncSource = "cab" | "nihilist";
 
 /** Where each source's position sync lives and its token. Nihilist's address: NIHILIST_POSITION_SYNC_URL. */
 /** CAB's address (from its position sync URL), for its strategy report. */
@@ -73,7 +80,14 @@ export async function readSourceSync(source: SyncSource, afterId = 0, fetchImpl:
         const v = Number(p.sourceStopLossPrice);
         stop = Number.isFinite(v) && v > 0 ? v : null;
       }
-      out.push({ sourceSignalId: String(p.sourceSignalId), action: String(p.sourceAction), stop });
+      // The source's own status (CAB: cancelled / reclassified come as action "review").
+      out.push({
+        sourceSignalId: String(p.sourceSignalId),
+        action: String(p.sourceAction),
+        ...(typeof p.sourceStatus === "string" ? { status: p.sourceStatus } : {}),
+        ...(typeof p.sourceCancelReason === "string" ? { cancelReason: p.sourceCancelReason } : {}),
+        stop,
+      });
     }
     after = body.nextAfterId ?? null;
   }
@@ -81,16 +95,65 @@ export async function readSourceSync(source: SyncSource, afterId = 0, fetchImpl:
 }
 
 const SIGNAL_NUM = /-(\d+)$/;
-async function syncSource(ex: Executor, source: SyncSource): Promise<number> {
-  // Only while there is an open trade of this source; start just before the oldest one.
-  const r = await pool.query<{ source_signal_id: string }>(
-    "SELECT source_signal_id FROM ex_trades WHERE source = $1 AND status IN ('open', 'closing') ORDER BY id", [source]);
-  if (!r.rowCount) return 0;
-  const nums = r.rows.map((x) => Number(SIGNAL_NUM.exec(x.source_signal_id)?.[1])).filter((n) => Number.isSafeInteger(n) && n > 0);
-  const after = nums.length ? Math.max(0, Math.min(...nums) - 1) : 0;
-  const states = await readSourceSync(source, after);
-  await ex.onSourceState(states);
-  return states.length;
+export async function syncSource(
+  ex: Executor,
+  source: SyncSource,
+  options: {
+    read?: typeof readSourceSync;
+    status?: Record<SyncSource, SourceSyncStatus>;
+    now?: () => number;
+  } = {},
+): Promise<number> {
+  const read = options.read ?? readSourceSync;
+  const status = options.status ?? syncState as Record<SyncSource, SourceSyncStatus>;
+  const now = options.now ?? Date.now;
+  status[source] = { at: now(), ok: false, error: "source position sync in progress" };
+  try {
+    // Only while there is an active trade of this source; start just before the oldest one.
+    const r = await pool.query<{ source_signal_id: string }>(
+      "SELECT source_signal_id FROM ex_trades WHERE source = $1 AND status IN ('opening', 'open', 'closing', 'unknown') ORDER BY id", [source]);
+    if (!r.rowCount) {
+      status[source] = { at: now(), ok: true, error: null };
+      return 0;
+    }
+    const nums = r.rows.map((x) => Number(SIGNAL_NUM.exec(x.source_signal_id)?.[1])).filter((n) => Number.isSafeInteger(n) && n > 0);
+    const after = nums.length ? Math.max(0, Math.min(...nums) - 1) : 0;
+    const states = await read(source, after);
+    await ex.onSourceState(states);
+    const missing = missingSourceSignals(r.rows.map((row) => row.source_signal_id), states.map((state) => state.sourceSignalId));
+    if (missing.length) throw new Error(`${source} position sync omitted ${missing.length} active signal(s)`);
+    if (states.some((state) => sourceActionKind(state.action, state.status) === "review")) {
+      throw new Error(`${source} has a cancellation/reclassification requiring review`);
+    }
+    if (states.some((state) => sourceActionKind(state.action, state.status) === "unknown")) {
+      throw new Error(`${source} position sync returned an unrecognized action`);
+    }
+    const cancelledIds = states
+      .filter((state) => sourceActionKind(state.action, state.status) === "close")
+      .map((state) => state.sourceSignalId);
+    if (cancelledIds.length) {
+      const unresolved = await pool.query<{ source_signal_id: string; status: string }>(
+        `SELECT source_signal_id, status FROM ex_trades
+         WHERE source = $1 AND source_signal_id = ANY($2::text[])
+           AND status IN ('opening', 'open', 'closing', 'unknown')
+         ORDER BY id`,
+        [source, cancelledIds],
+      );
+      if (unresolved.rowCount) {
+        const ids = [...new Set(unresolved.rows.map((row) => row.source_signal_id))].join(", ");
+        throw new Error(`${source} cancellation remains unresolved for ${ids}`);
+      }
+    }
+    status[source] = { at: now(), ok: true, error: null };
+    return states.length;
+  } catch (e) {
+    status[source] = {
+      at: now(),
+      ok: false,
+      error: e instanceof Error ? e.message.slice(0, 160) : String(e).slice(0, 160),
+    };
+    throw e;
+  }
 }
 
 export async function startExecutor(log: (msg: string, extra?: unknown) => void): Promise<void> {
@@ -98,8 +161,12 @@ export async function startExecutor(log: (msg: string, extra?: unknown) => void)
   await ensureExecutorTables();
   executor = createExecutor({
     loadAccounts,
-    bingx: (a) => createBingX({ env: a.env, key: a.key, secret: a.secret }),
+    entryAllowed: accountEntryAllowed,
+    bingx: (a) => (a.paper
+      ? createBingX({ env: "vst", key: a.key, secret: a.secret, host: "https://paper.local", fetchImpl: (paperFetch ??= createPaperFetch()) })
+      : createBingX({ env: a.env, key: a.key, secret: a.secret })),
     send: telegramSender,
+    sourceSyncStatus: (source) => syncState[source],
     log,
   });
   handler = createIntakeHandler(executor, { log });
@@ -114,8 +181,8 @@ export async function startExecutor(log: (msg: string, extra?: unknown) => void)
     reconciling = true;
     const t0 = Date.now();
     try {
-      await ex.reconcileAll();
-      Object.assign(lastReconcile, { at: Date.now(), ms: Date.now() - t0, ok: true, error: null });
+      const accounts = await ex.reconcileAll();
+      Object.assign(lastReconcile, { at: Date.now(), ms: Date.now() - t0, ok: true, error: null, accounts });
     } catch (e) {
       Object.assign(lastReconcile, { at: Date.now(), ms: Date.now() - t0, ok: false, error: e instanceof Error ? e.message.slice(0, 200) : String(e) });
       log("executor: reconcile pass failed", e);
@@ -130,9 +197,7 @@ export async function startExecutor(log: (msg: string, extra?: unknown) => void)
   setInterval(() => {
     for (const source of ["cab", "nihilist"] as const) {
       void syncSource(ex, source)
-        .then(() => { lastSync[source] = { at: Date.now(), ok: true, error: null }; })
         .catch((e) => {
-          lastSync[source] = { at: Date.now(), ok: false, error: e instanceof Error ? e.message.slice(0, 160) : String(e) };
           log(`executor: ${source} sync failed`, e);
         });
     }
@@ -140,6 +205,10 @@ export async function startExecutor(log: (msg: string, extra?: unknown) => void)
 }
 
 const SOURCE_NAME: Record<string, string> = { cab: "CAB", nihilist: "Нигилист" };
+/** Owner 2026-11-09: closes caused by a source's cancellation (see texts.ts isCancelReason) — not a win or a loss. */
+const CANCEL_SQL = `coalesce(close_reason LIKE 'cancel:%' OR close_reason LIKE 'cancel\\_sync:%'
+  OR (close_reason LIKE 'source:%' AND substr(close_reason, 8) NOT IN ('stop_loss','expired','breakeven_stop','breakeven_close','trailing_stop','profit','core_exit','close','')
+    AND close_reason NOT LIKE 'source:stop\\_loss:%'), false)`;
 const STATUS_TEXT: Record<string, string> = {
   opening: "открывается", open: "открыта", closing: "закрывается", closed: "закрыта",
   skipped: "не открыта", failed: "не открыта (ошибка)", unknown: "сверяется с биржей",
@@ -154,7 +223,7 @@ function tradeView(t: any) {
   return {
     id: t.id, accountId: t.account_id, source: t.source, sourceName: SOURCE_NAME[t.source] ?? t.source, sourceSignalId: t.source_signal_id,
     symbol: t.symbol, side: t.side, pattern: t.pattern, env: t.env, status: t.status, statusText: STATUS_TEXT[t.status] ?? t.status,
-    reason: reasonKey ?? null, reasonText, takePct: n(t.take_pct),
+    reason: reasonKey ?? null, reasonText, takePct: n(t.take_pct), cancelled: t.status === "closed" && isCancelReason(t.close_reason),
     leverage: n(t.leverage) ?? 10, mgmt: t.mgmt ?? null, mgmtLabel: t.mgmt ? nihilistStrategy(t.mgmt).label : null, peakPct: n(t.peak_pct),
     signalAt: iso(t.signal_at), receivedAt: iso(t.received_at), entrySentAt: iso(t.entry_sent_at), openedAt: iso(t.opened_at), closedAt: iso(t.closed_at),
     entryDelaySec: sentAt ? Math.round((sentAt - new Date(t.received_at).getTime()) / 100) / 10 : null,
@@ -201,7 +270,9 @@ export async function executorStatus(): Promise<unknown> {
     pool.query("SELECT * FROM ex_trades WHERE status = 'closed' ORDER BY closed_at DESC NULLS LAST, id DESC LIMIT 500"),
     pool.query("SELECT * FROM ex_trades WHERE status IN ('skipped','failed') ORDER BY id DESC LIMIT 300"),
     pool.query(`SELECT account_id, source, side, count(*)::int AS closed,
-                       count(*) FILTER (WHERE pnl > 0)::int AS wins, count(*) FILTER (WHERE pnl < 0)::int AS losses,
+                       count(*) FILTER (WHERE pnl > 0 AND NOT ${CANCEL_SQL})::int AS wins, count(*) FILTER (WHERE pnl < 0 AND NOT ${CANCEL_SQL})::int AS losses,
+                       count(*) FILTER (WHERE ${CANCEL_SQL})::int AS cancelled,
+                       coalesce(sum(pnl) FILTER (WHERE ${CANCEL_SQL}), 0)::float8 AS cancelled_pnl,
                        count(*) FILTER (WHERE close_reason = 'liquidation')::int AS liquidations,
                        coalesce(sum(pnl), 0)::float8 AS pnl
                 FROM ex_trades WHERE status = 'closed' GROUP BY 1, 2, 3 ORDER BY 1, 2, 3`),
@@ -225,10 +296,12 @@ export async function executorStatus(): Promise<unknown> {
     inbox: await inboxBySource(),
     telegram: await telegramOutboxStatus().catch(() => null),
     cab: { settings: await getSourceSettings("cab") },
-    nihilist: { settings: await getSourceSettings("nihilist"), strategies: nihilistStrategies().map(({ id, label }) => ({ id, label })) },
+    nihilist: { settings: await getSourceSettings("nihilist"), sideSettings: await getNihilistSettings("owner"),
+      strategies: nihilistStrategies().map(({ id, label }) => ({ id, label })) },
     btc: { settings: await getBtcSettings("owner"), maxLeverage: BTC_MAX_LEVERAGE },
     accounts: executor ? [...executor.runtimes.values()].map((r) => ({
       id: r.acct.id, label: r.acct.label, env: r.acct.env, strategy: r.acct.strategy.name, takePct: r.acct.strategy.takePct,
+      paper: Boolean(r.acct.paper), sources: [...r.acct.sources],
       balance: lv.balances.get(r.acct.id) ?? null,
     })) : [],
     sync: Object.fromEntries(Object.entries(syncState).map(([k, v]) => [k, { at: v.at ? new Date(v.at).toISOString() : null, ok: v.ok, error: v.error }])),
@@ -236,7 +309,8 @@ export async function executorStatus(): Promise<unknown> {
     closed: closedQ.rows.map(tradeView),
     skipped: skippedQ.rows.map(tradeView),
     totals: totalsQ.rows.map((r) => ({ accountId: r.account_id, source: r.source, sourceName: SOURCE_NAME[r.source] ?? r.source, side: r.side,
-      closed: r.closed, wins: r.wins, losses: r.losses, liquidations: r.liquidations, pnl: Number(r.pnl) })),
+      closed: r.closed, wins: r.wins, losses: r.losses, liquidations: r.liquidations, pnl: Number(r.pnl),
+      cancelled: r.cancelled, cancelledPnl: Number(r.cancelled_pnl) })),
     skippedTotals: skipTotalsQ.rows.map((r) => ({ source: r.source, sourceName: SOURCE_NAME[r.source] ?? r.source, reason: r.reason,
       reasonText: REASON_TEXT[r.reason] ?? r.reason, n: r.n })),
   };
@@ -330,6 +404,11 @@ export async function executorHealth(): Promise<unknown> {
   const view = (r: any) => ({ id: r.id, accountId: r.account_id, source: SOURCE_NAME[r.source] ?? r.source, symbol: r.symbol, side: r.side, status: STATUS_TEXT[r.status] ?? r.status ?? "открыта", since: iso(r.received_at ?? r.opened_at) });
   if (stuckQ.rowCount) problems.push({ level: "red", text: `Сделки застряли при открытии или закрытии: ${stuckQ.rowCount}` });
   if (unannQ.rowCount) problems.push({ level: "yellow", text: `Открытые сделки без сообщения «Открыт…»: ${unannQ.rowCount} — сверка доведёт их` });
+
+  // Owner 2026-11-06: an account whose reconcile pass fails (closes by hand, stops, takes are then not seen).
+  if (enabled && executor) for (const a of lastReconcile.accounts) {
+    if (!a.ok) problems.push({ level: "red", text: `${a.label}: сверка с биржей не проходит — ${a.error}. Закрытия (в том числе руками) не видны боту.` });
+  }
 
   // Sources: signals (last 24 h) and the position sync (only matters while a trade of the source is open).
   const inbox = await inboxBySource();

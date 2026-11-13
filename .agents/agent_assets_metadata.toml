@@ -1,0 +1,30 @@
+uploads = []
+generated = []
+
+[[outputs]]
+id = "pGu9Q5XmtQTe5KCLRh2U_"
+uri = "file://engine-before.ts"
+type = "unspecified"
+title = "engine-before.ts"
+description = "Исходная версия engine.ts из коммита 6d803deeb375c548ec5f7df025da5cdfd57f01db от 8 ноября 2026 года."
+logical_id = "8a517f39-8419-4df2-8b9a-5f5a42b7a1b3"
+content_hash = "sha256:e24f7ef4fe80451b4b5e3f4a8498d47b87177ebdbfe53208bc317cee23f8fe9c"
+size = 70698
+mtime_ms = 1794235645381
+storage_uri = "gcs://replit-rams-assets-janeway/rams/assets/repl:2284c048-d545-496b-b20a-27f7051bb340/8a517f39-8419-4df2-8b9a-5f5a42b7a1b3/31c16f48-772f-4a4a-800f-d89fb9288bd2"
+storage_version_token = "1794235690341533"
+content_type = "application/octet-stream"
+
+[[outputs]]
+id = "bf3UiUU6deo_t_qBUyUTR"
+uri = "file://replit-6d803de.zip"
+type = "unspecified"
+title = "replit-6d803de.zip"
+description = "Исходники коммита 6d803deeb375c548ec5f7df025da5cdfd57f01db по перечисленным путям; проверено, что в архиве нет .env, секретов, node_modules и dist."
+logical_id = "c79cf033-b4ac-4020-b18b-d5c616cb73e2"
+content_hash = "sha256:18512113402ce5bc7d58d78e9d55765c3f312ce508711f20923df29460344fe9"
+size = 1999396
+mtime_ms = 1794235879306
+storage_uri = "gcs://replit-rams-assets-janeway/rams/assets/repl:2284c048-d545-496b-b20a-27f7051bb340/c79cf033-b4ac-4020-b18b-d5c616cb73e2/95bd2c6a-9b02-455f-a508-2e881f3dc2e8"
+storage_version_token = "1794235887993135"
+content_type = "application/octet-stream"

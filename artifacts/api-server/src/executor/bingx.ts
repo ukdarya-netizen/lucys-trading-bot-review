@@ -14,7 +14,9 @@
  * (blocks under 30 s each, up to 2 minutes in all, waiters spread at random). A refusal for rate is its own kind — never read as
  * «order not found» or «already cancelled». Open orders of a symbol are kept for
  * 5 s (cleared by any order placed or cancelled on it): stop and take checks in a
- * row ask BingX once, and a reconcile pass asks once for all symbols.
+ * row ask BingX once, and a reconcile pass asks once for all symbols. Every open-orders question is
+ * one request for the whole account, shared while in flight (a burst of signals = one request), and
+ * the queue and endpoint blocks are shared by every account on the same key (owner 2026-11-07).
  */
 import { createHmac } from "node:crypto";
 
@@ -25,6 +27,7 @@ export const HOSTS: Record<Env, string> = {
 };
 const MIN_GAP_MS = 120;
 const TIMEOUT_MS = 8_000;
+const CLOCK_SYNC_MAX_RTT_MS = 2_000;
 
 export class BingXError extends Error {
   constructor(message: string, public code: number | null, public kind: "exchange" | "network" | "timeout" | "http" | "rate") {
@@ -104,33 +107,50 @@ function toOrder(o: any): Order {
 
 export type Fetch = typeof fetch;
 
+/**
+ * One BingX key = one rate limit, however many accounts use it (owner 2026-11-07: the owner's VST and
+ * REAL accounts share one key and each had its own queue — twice the requests, and one did not know
+ * the other was blocked → 100410 on openOrders). The queue spacing and the endpoint blocks are kept per
+ * key and shared by every client of that key. Paper (its own fetch) never shares.
+ */
+type Limiter = { queue: { prio: number; run: () => Promise<void> }[]; busy: boolean; lastAt: number; blockedUntil: Map<string, number> };
+const limiters = new Map<string, Limiter>();
+function limiterFor(key: string, shared: boolean): Limiter {
+  const fresh = (): Limiter => ({ queue: [], busy: false, lastAt: 0, blockedUntil: new Map() });
+  if (!shared) return fresh();
+  let l = limiters.get(key);
+  if (!l) { l = fresh(); limiters.set(key, l); }
+  return l;
+}
+
 export function createBingX(opts: { env: Env; key: string; secret: string; fetchImpl?: Fetch; now?: () => number; host?: string }) {
   const host = opts.host ?? HOSTS[opts.env];
   const doFetch = opts.fetchImpl ?? fetch;
   const now = opts.now ?? Date.now;
   const marginAsset = opts.env === "vst" ? "VST" : "USDT";
+  const limiter = limiterFor(opts.key, !opts.fetchImpl);
+  const canSyncClock = !opts.fetchImpl && !opts.host;
+  let clockOffsetMs = 0;
+  let clockSyncInFlight: Promise<void> | null = null;
 
   // ---- per-account queue: entries first ----
-  type Job = { prio: number; run: () => Promise<void> };
-  const queue: Job[] = [];
-  let busy = false;
-  let lastAt = 0;
+  const queue = limiter.queue;
   const prioOf: Record<Priority, number> = { entry: 0, protect: 1, normal: 2 };
   async function pump() {
-    if (busy) return;
-    busy = true;
+    if (limiter.busy) return;
+    limiter.busy = true;
     try {
       while (queue.length) {
         queue.sort((a, b) => a.prio - b.prio);
         const job = queue.shift()!;
-        const wait = lastAt + MIN_GAP_MS - Date.now();
+        const wait = limiter.lastAt + MIN_GAP_MS - Date.now();
         if (wait > 0) await new Promise((r) => setTimeout(r, wait));
-        lastAt = Date.now();
+        limiter.lastAt = Date.now();
         // Start spacing only: a slow answer never holds the next request.
         void job.run();
       }
     } finally {
-      busy = false;
+      limiter.busy = false;
     }
   }
   function schedule<T>(priority: Priority, fn: () => Promise<T>): Promise<T> {
@@ -146,7 +166,7 @@ export function createBingX(opts: { env: Env; key: string; secret: string; fetch
     let url: string;
     const headers: Record<string, string> = {};
     if (signed) {
-      values.timestamp = String(now());
+      values.timestamp = String(Math.round(now() + clockOffsetMs));
       values.recvWindow = "5000";
       const sorted = Object.entries(values).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
       const signingText = sorted.map(([k, v]) => `${k}=${v}`).join("&");
@@ -166,13 +186,19 @@ export function createBingX(opts: { env: Env; key: string; secret: string; fetch
     }
     const text = await res.text().catch(() => "");
     let body: any;
-    try { body = parseLossless(text); } catch { throw new BingXError(`${method} ${path}: HTTP ${res.status}`, null, res.status >= 500 ? "network" : "http"); }
+    try { body = parseLossless(text); } catch {
+      const diagnostic = path === "/openApi/swap/v2/quote/contracts"
+        ? `; type=${(res.headers.get("content-type") ?? "unknown").replace(/[\r\n]/g, " ").slice(0, 40)}; chars=${text.length}; preview=${JSON.stringify(text.replace(/[\u0000-\u001f\u007f]/g, " ").replace(/\s+/g, " ").trim().slice(0, 48))}`
+        : "";
+      throw new BingXError(`${method} ${path}: invalid JSON HTTP ${res.status}${diagnostic}`, null, res.status >= 500 ? "network" : "http");
+    }
     if (body?.code !== 0) {
       const code = Number(body?.code ?? -1);
       const msg = String(body?.msg ?? "");
-      if (code === 100410 || code === 100429 || res.status === 429) {
-        const until = Number(/unblocked after (\d{13})/.exec(msg)?.[1]);
-        blockedUntil.set(path, Number.isFinite(until) && until > Date.now() ? until : Date.now() + 2_000);
+      if (code === 100410 || code === 100429 || code === 109429 || res.status === 429) {
+        const until = Number(/(?:unblocked after|(?:can\s+)?retry after time:)\s*(\d{13})/i.exec(msg)?.[1]);
+        const fallbackMs = code === 109429 ? 480_000 : 2_000;
+        blockedUntil.set(path, Number.isFinite(until) && until > Date.now() ? until : Date.now() + fallbackMs);
         const hits = health.rateHits.get(path) ?? [];
         hits.push(Date.now());
         health.rateHits.set(path, hits.filter((t) => t > Date.now() - 3_600_000));
@@ -183,7 +209,44 @@ export function createBingX(opts: { env: Env; key: string; secret: string; fetch
     }
     return body.data;
   }
-  const blockedUntil = new Map<string, number>();
+  async function syncClock(): Promise<void> {
+    if (!canSyncClock) throw new BingXError("Server-time sync is unavailable for this custom client", 109400, "exchange");
+    if (clockSyncInFlight) return clockSyncInFlight;
+    const sync = (async () => {
+      const sentAt = now();
+      let res: Response;
+      try {
+        res = await doFetch(`${host}/openApi/swap/v2/server/time`, { method: "GET", signal: AbortSignal.timeout(TIMEOUT_MS) });
+      } catch (err) {
+        const timeout = err instanceof Error && (err.name === "TimeoutError" || err.name === "AbortError");
+        throw new BingXError(`GET /openApi/swap/v2/server/time: ${timeout ? "timeout" : "network error"}`, null, timeout ? "timeout" : "network");
+      }
+      const receivedAt = now();
+      const roundTrip = receivedAt - sentAt;
+      if (roundTrip < 0 || roundTrip > CLOCK_SYNC_MAX_RTT_MS) {
+        throw new BingXError(`GET /openApi/swap/v2/server/time: round trip ${roundTrip}ms is too slow to sync safely`, null, "timeout");
+      }
+      const text = await res.text().catch(() => "");
+      let body: any;
+      try { body = parseLossless(text); } catch {
+        throw new BingXError(`GET /openApi/swap/v2/server/time: HTTP ${res.status}`, null, res.status >= 500 ? "network" : "http");
+      }
+      const code = Number(body?.code ?? -1);
+      const serverTime = Number(body?.data?.serverTime);
+      if (!res.ok || code !== 0 || !Number.isFinite(serverTime) || serverTime <= 0) {
+        const message = String(body?.msg ?? `HTTP ${res.status}`);
+        throw new BingXError(`GET /openApi/swap/v2/server/time: ${code} ${message}`.trim(), Number.isFinite(code) ? code : null, res.status >= 500 ? "network" : "exchange");
+      }
+      clockOffsetMs = serverTime - (sentAt + receivedAt) / 2;
+    })();
+    clockSyncInFlight = sync;
+    try {
+      await sync;
+    } finally {
+      if (clockSyncInFlight === sync) clockSyncInFlight = null;
+    }
+  }
+  const blockedUntil = limiter.blockedUntil;
   // For Bot Health: requests, rate-limit hits per endpoint (times of the last hour), last refusal.
   const health = { requests: 0, rateHits: new Map<string, number[]>(), lastError: null as { at: number; message: string } | null };
   function stats() {
@@ -205,11 +268,24 @@ export function createBingX(opts: { env: Env; key: string; secret: string; fetch
     // A burst of signals: many requests wait for the same unblock moment and may hit the limit
     // again together — retried until it passes (with a small random spread), up to RATE_TOTAL_MS.
     const started = Date.now();
+    let timestampRetries = 0;
     for (let attempt = 0; ; attempt++) {
       await waitUnblocked(path, attempt);
       try {
-        return await schedule(priority, () => raw(method, path, params, signed));
+        return await schedule(priority, () => {
+          // Blocked while this request waited in the queue (another request on the key was refused):
+          // never fire into a known block — wait for the unblock moment instead.
+          if ((blockedUntil.get(path) ?? 0) > Date.now()) {
+            return Promise.reject(new BingXError(`${method} ${path}: blocked (waiting for the unblock)`, 100410, "rate"));
+          }
+          return raw(method, path, params, signed);
+        });
       } catch (e) {
+        if (signed && canSyncClock && e instanceof BingXError && e.code === 109400 && timestampRetries === 0) {
+          timestampRetries += 1;
+          await syncClock();
+          continue;
+        }
         if (!(e instanceof BingXError && e.kind === "rate")) throw e;
         const ms = (blockedUntil.get(path) ?? 0) - Date.now();
         if (ms > RATE_RETRY_MAX_MS || Date.now() - started > RATE_TOTAL_MS || attempt >= 8) throw e;
@@ -224,15 +300,26 @@ export function createBingX(opts: { env: Env; key: string; secret: string; fetch
     // A coin missing from a list older than a minute: reload once (a new listing is not «no such contract»).
     const stale = !contracts || now() - contractsAt > 3_600_000 || (!contracts.has(exSymbol(symbol)) && now() - contractsAt > 60_000);
     if (stale) {
-      const data = await call(p, "GET", "/openApi/swap/v2/quote/contracts", {}, false);
-      const m = new Map<string, Contract>();
-      for (const r of Array.isArray(data) ? data : []) {
-        m.set(r.symbol, {
-          symbol: r.symbol, quantityPrecision: Number(r.quantityPrecision), pricePrecision: Number(r.pricePrecision),
-          minQty: num(r.tradeMinQuantity) || 0, minNotional: num(r.tradeMinUSDT) || 0,
-        });
+      for (let attempt = 0; attempt < 3; attempt++) {
+        try {
+          const data = await call(p, "GET", "/openApi/swap/v2/quote/contracts", {}, false);
+          if (!Array.isArray(data) || data.length === 0) {
+            throw new BingXError("GET /openApi/swap/v2/quote/contracts: empty or invalid contract list", null, "network");
+          }
+          const m = new Map<string, Contract>();
+          for (const r of data) {
+            m.set(r.symbol, {
+              symbol: r.symbol, quantityPrecision: Number(r.quantityPrecision), pricePrecision: Number(r.pricePrecision),
+              minQty: num(r.tradeMinQuantity) || 0, minNotional: num(r.tradeMinUSDT) || 0,
+            });
+          }
+          contracts = m; contractsAt = now();
+          break;
+        } catch (e) {
+          if (attempt < 2) await sleep(1_000);
+          else if (!contracts) throw e;
+        }
       }
-      contracts = m; contractsAt = now();
     }
     const c = contracts?.get(exSymbol(symbol));
     if (!c) throw new BingXError(`${symbol}: no such contract`, null, "exchange");
@@ -309,9 +396,9 @@ export function createBingX(opts: { env: Env; key: string; secret: string; fetch
     }
   }
   async function placeOrder(params: Record<string, string | number | undefined>, p: Priority): Promise<Order> {
-    if (params.symbol) openCache.delete(String(params.symbol));
+    if (params.symbol) { openCache.delete(String(params.symbol)); changedAt.set(String(params.symbol), Date.now()); }
     const d = await call(p, "POST", "/openApi/swap/v2/trade/order", params);
-    if (params.symbol) openCache.delete(String(params.symbol));
+    if (params.symbol) { openCache.delete(String(params.symbol)); changedAt.set(String(params.symbol), Date.now()); }
     return toOrder(d?.order ?? d);
   }
   async function queryOrder(symbol: string, by: { orderId?: string; clientOrderId?: string }, p: Priority = "normal"): Promise<Order | null> {
@@ -325,13 +412,43 @@ export function createBingX(opts: { env: Env; key: string; secret: string; fetch
     }
   }
   const openCache = new Map<string, { at: number; list: Order[]; ttl: number }>();
+  /** When a symbol's orders last changed (an order placed / cancelled): an older snapshot is not used for it. */
+  const changedAt = new Map<string, number>();
   const OPEN_CACHE_MS = 5_000;
   /** A reconcile pass (every 20 s) may take longer than 5 s with many positions: its snapshot lives 15 s. */
   const PREFETCH_CACHE_MS = 15_000;
+  let inflightAll: { at: number; p: Promise<Order[]> } | null = null;
+  /**
+   * Owner 2026-11-07 (100410 on openOrders during a burst of signals): every open-orders question is
+   * answered from ONE request for the whole account, shared by everyone who asks while it is in flight.
+   * Ten signals at once = one request, not ten.
+   */
+  function fetchAllOpen(p: Priority): Promise<{ at: number; all: Order[] }> {
+    if (inflightAll) { const f = inflightAll; return f.p.then((all) => ({ at: f.at, all })); }
+    const at = Date.now();
+    const req = call(p, "GET", "/openApi/swap/v2/trade/openOrders", {})
+      .then((d) => (Array.isArray(d) ? d : d?.orders ?? []).map(toOrder) as Order[])
+      .finally(() => { if (inflightAll?.p === req) inflightAll = null; });
+    inflightAll = { at, p: req };
+    return req.then((all) => ({ at, all }));
+  }
+  function cacheSnapshot(symbols: Iterable<string>, at: number, all: Order[], ttl: number) {
+    for (const s of symbols) {
+      if ((changedAt.get(s) ?? 0) >= at) continue; // changed after the snapshot was asked for
+      openCache.set(s, { at, list: all.filter((o) => o.symbol === s), ttl });
+    }
+  }
   async function openOrders(symbol: string, p: Priority = "normal"): Promise<Order[]> {
     const key = exSymbol(symbol);
-    const hit = openCache.get(key);
-    if (hit && Date.now() - hit.at < hit.ttl) return hit.list;
+    for (let i = 0; i < 2; i++) {
+      const hit = openCache.get(key);
+      if (hit && Date.now() - hit.at < hit.ttl) return hit.list;
+      const { at, all } = await fetchAllOpen(p);
+      // Every symbol in the answer is cached (a burst of signals asks right after), plus this one.
+      cacheSnapshot(new Set([key, ...all.map((o) => o.symbol)]), at, all, OPEN_CACHE_MS);
+      if ((changedAt.get(key) ?? 0) < at) return all.filter((o) => o.symbol === key);
+      // This symbol changed while the request was in flight: ask once more.
+    }
     const d = await call(p, "GET", "/openApi/swap/v2/trade/openOrders", { symbol: key });
     const list = (Array.isArray(d) ? d : d?.orders ?? []).map(toOrder);
     openCache.set(key, { at: Date.now(), list, ttl: OPEN_CACHE_MS });
@@ -339,16 +456,16 @@ export function createBingX(opts: { env: Env; key: string; secret: string; fetch
   }
   /** One request for all open orders of the account (a reconcile pass): every symbol asked is cached, empty ones too. */
   async function prefetchOpenOrders(symbols: string[], p: Priority = "normal"): Promise<void> {
-    const at = Date.now();
-    const d = await call(p, "GET", "/openApi/swap/v2/trade/openOrders", {});
-    const all: Order[] = (Array.isArray(d) ? d : d?.orders ?? []).map(toOrder);
-    for (const s of new Set(symbols.map(exSymbol))) openCache.set(s, { at, list: all.filter((o) => o.symbol === s), ttl: PREFETCH_CACHE_MS });
+    const { at, all } = await fetchAllOpen(p);
+    cacheSnapshot(new Set([...symbols.map(exSymbol), ...all.map((o) => o.symbol)]), at, all, PREFETCH_CACHE_MS);
   }
   async function cancelOrder(symbol: string, orderId: string, p: Priority = "protect"): Promise<void> {
-    openCache.delete(exSymbol(symbol));
+    openCache.delete(exSymbol(symbol)); changedAt.set(exSymbol(symbol), Date.now());
     try { await call(p, "DELETE", "/openApi/swap/v2/trade/order", { symbol: exSymbol(symbol), orderId }); } catch (e) {
       // Already filled / cancelled: nothing to cancel.
       if (!(e instanceof BingXError && e.kind === "exchange")) throw e;
+    } finally {
+      openCache.delete(exSymbol(symbol)); changedAt.set(exSymbol(symbol), Date.now());
     }
   }
   async function history(symbol: string, sinceMs: number, p: Priority = "normal"): Promise<Order[]> {

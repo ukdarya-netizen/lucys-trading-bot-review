@@ -5,6 +5,81 @@
  * Signal intake and safety controls for the isolated trading executor.
  * OpenAPI spec version: 0.1.0
  */
+export type SubscriberSourcesInputSourcesItem = typeof SubscriberSourcesInputSourcesItem[keyof typeof SubscriberSourcesInputSourcesItem];
+
+
+export const SubscriberSourcesInputSourcesItem = {
+  cab: 'cab',
+  nihilist: 'nihilist',
+} as const;
+
+export interface SubscriberSourcesInput {
+  /**
+     * @minItems 1
+     * @maxItems 2
+     */
+  sources: SubscriberSourcesInputSourcesItem[];
+}
+
+export type SubscriberSourcesResultTradeSourcesItem = typeof SubscriberSourcesResultTradeSourcesItem[keyof typeof SubscriberSourcesResultTradeSourcesItem];
+
+
+export const SubscriberSourcesResultTradeSourcesItem = {
+  cab: 'cab',
+  nihilist: 'nihilist',
+} as const;
+
+export interface SubscriberSourcesResult {
+  id: number;
+  /**
+     * @minItems 1
+     * @maxItems 2
+     */
+  tradeSources: SubscriberSourcesResultTradeSourcesItem[];
+}
+
+export type ExecutorTradingControlInputTarget = typeof ExecutorTradingControlInputTarget[keyof typeof ExecutorTradingControlInputTarget];
+
+
+export const ExecutorTradingControlInputTarget = {
+  owner: 'owner',
+  subscribers: 'subscribers',
+} as const;
+
+export interface ExecutorTradingControlInput {
+  target: ExecutorTradingControlInputTarget;
+  enabled: boolean;
+}
+
+export type ExecutorTradingControlStateTarget = typeof ExecutorTradingControlStateTarget[keyof typeof ExecutorTradingControlStateTarget];
+
+
+export const ExecutorTradingControlStateTarget = {
+  owner: 'owner',
+  subscribers: 'subscribers',
+} as const;
+
+export type ExecutorTradingControlStateEnv = typeof ExecutorTradingControlStateEnv[keyof typeof ExecutorTradingControlStateEnv];
+
+
+export const ExecutorTradingControlStateEnv = {
+  vst: 'vst',
+} as const;
+
+export interface ExecutorTradingControlState {
+  target: ExecutorTradingControlStateTarget;
+  env: ExecutorTradingControlStateEnv;
+  enabled: boolean;
+  effective: boolean;
+  canManage: boolean;
+  canEnable: boolean;
+  /** @nullable */
+  blockedReason: string | null;
+  activeAccounts: number;
+  /** @nullable */
+  startedAt: string | null;
+}
+
 export type OwnerTradingResetInputConfirm = typeof OwnerTradingResetInputConfirm[keyof typeof OwnerTradingResetInputConfirm];
 
 

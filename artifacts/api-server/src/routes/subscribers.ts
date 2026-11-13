@@ -1,10 +1,14 @@
 import { clerkClient, getAuth } from "@clerk/express";
 import { Router, type IRouter, type Request, type Response } from "express";
 import { pool } from "@workspace/db";
-import { announceRequest, botUsername, decide, send as sendTelegram, TEXT as SUB_TEXT, type Decision } from "../lib/subscriber-bot";
+import { SetSubscriberSourcesBody, SetSubscriberSourcesParams, SetSubscriberSourcesResponse } from "@workspace/api-zod";
+import { announceRequest, botUsername, decide, isOwnerRow, send as sendTelegram, TEXT as SUB_TEXT, type Decision, type Term } from "../lib/subscriber-bot";
 import { BTC_MAX_LEVERAGE, getBtcSettings, getSourceSettings, saveBtcSettings } from "../executor/store";
 import { closeReasonText } from "../executor/texts";
-import { nihilistStrategy } from "../executor/plan";
+import { subscriberTrades } from "../lib/subscriber-trades";
+import { cabReport, nihilistCall } from "./executor";
+import { nihilistStrategies, nihilistStrategy } from "../executor/plan";
+import { describeNihilistSettings, getNihilistSettings, saveNihilistSideSettings, validNihilistSettings } from "../executor/nihilist-settings";
 
 type SrcStat = { closed: number; pnl: number };
 async function executorStatsByAccount(): Promise<Map<string, { cab: SrcStat; nihilist: SrcStat; open: number }>> {
@@ -91,8 +95,10 @@ function publicView(row: Row) {
     runtimeAt: row.runtime_at ?? null,
     telegramChatId: (row.telegram_chat_id as string | null | undefined) ?? null,
     telegramUsername: (row.telegram_username as string | null | undefined) ?? null,
-    subscribedUntil: row.subscribed_until ?? null,
-    subscriptionEnded: subscriptionEnded(row),
+    // Owner 2026-11-09: the owner's own access is unlimited — no date anywhere.
+    isOwner: isOwnerRow(row),
+    subscribedUntil: isOwnerRow(row) ? null : row.subscribed_until ?? null,
+    subscriptionEnded: !isOwnerRow(row) && subscriptionEnded(row),
     tradeSources: String(row.trade_sources ?? "cab").split(",").filter(Boolean),
   };
 }
@@ -111,14 +117,15 @@ async function subscriberFor(req: Request): Promise<Row> {
   if (isOwner(userId) && row.status !== "approved") {
     const approved = await pool.query(
       `UPDATE subscribers SET status = 'approved', real_allowed = true, decided_at = now(), decided_by = $2,
-         version = version + 1, updated_at = now() WHERE id = $1 RETURNING *`,
+         subscribed_until = NULL, expiry_notice = NULL, version = version + 1, updated_at = now() WHERE id = $1 RETURNING *`,
       [row.id, userId]);
     return approved.rows[0] as Row;
   }
-  if (isOwner(userId) && !row.real_allowed) {
-    const allowed = await pool.query(
-      "UPDATE subscribers SET real_allowed = true, updated_at = now() WHERE id = $1 RETURNING *", [row.id]);
-    return allowed.rows[0] as Row;
+  // The owner's access never ends (owner 2026-11-09): a date set by an earlier approval is removed.
+  if (isOwner(userId) && (row.subscribed_until || row.expiry_notice || !row.real_allowed)) {
+    const fixed = await pool.query(
+      "UPDATE subscribers SET subscribed_until = NULL, expiry_notice = NULL, real_allowed = true, updated_at = now() WHERE id = $1 RETURNING *", [row.id]);
+    return fixed.rows[0] as Row;
   }
   return row;
 }
@@ -263,6 +270,37 @@ router.get("/me/results", async (req, res) => {
   } catch {
     res.json({ trades: [] });
   }
+});
+
+// Owner 2026-11-06: the subscriber's own positions and history for the subscriber pages (own accounts only).
+router.get("/me/trades", async (req, res) => {
+  res.setHeader("Cache-Control", "no-store");
+  const row = await subscriberFor(req);
+  if (row.status !== "approved") return refuse(res, 403, "not_approved", "Заявка ещё не одобрена");
+  const scope = req.query.scope === "open" || req.query.scope === "closed" ? req.query.scope : "all";
+  const days = Number(req.query.days ?? 90);
+  try {
+    res.json(await subscriberTrades(row.id, { scope, days: Number.isFinite(days) ? days : 90 }));
+  } catch {
+    res.status(503).json({ error: { code: "trades_unavailable", message: "Не удалось загрузить сделки" } });
+  }
+});
+
+// Owner 2026-11-06: the bots' own results (every way to lead the trades, on the bots' real signals and the
+// Nihilist backtest) for approved subscribers — read only; no "run" for them. Same reports as the owner's «Боты».
+router.get("/me/bot-report/cab", async (req, res) => {
+  res.setHeader("Cache-Control", "no-store");
+  const row = await subscriberFor(req);
+  if (row.status !== "approved") return refuse(res, 403, "not_approved", "Заявка ещё не одобрена");
+  const out = await cabReport(req.query.days);
+  res.status(out.status).json(out.body);
+});
+router.get("/me/bot-report/nihilist", async (req, res) => {
+  res.setHeader("Cache-Control", "no-store");
+  const row = await subscriberFor(req);
+  if (row.status !== "approved") return refuse(res, 403, "not_approved", "Заявка ещё не одобрена");
+  const out = await nihilistCall("/api/trading/strategy-report", "GET");
+  res.status(out.status).json(out.body);
 });
 
 router.get("/me/performance", async (req, res) => {
@@ -435,7 +473,22 @@ router.get("/me/sources", async (req, res) => {
   const row = await subscriberFor(req);
   const [cab, nh] = await Promise.all([getSourceSettings("cab"), getSourceSettings("nihilist")]);
   const m = nihilistStrategy(nh.strategy);
-  res.json({ chosen: String(row.trade_sources ?? "cab").split(",").filter(Boolean), available: { cab: cab.subscribers, nihilist: nh.subscribers }, nihilistStrategy: { id: m.id, label: m.label } });
+  res.json({ chosen: String(row.trade_sources ?? "cab").split(",").filter(Boolean), available: { cab: cab.subscribers, nihilist: nh.subscribers },
+    nihilistStrategy: { id: m.id, label: m.label },
+    nihilistSettings: await getNihilistSettings(`sub-${row.id}`, nh.strategy),
+    nihilistStrategies: nihilistStrategies().map(({ id, label }) => ({ id, label })) });
+});
+router.post("/me/nihilist-sides", async (req, res) => {
+  const row = await subscriberFor(req);
+  if (row.status !== "approved") return refuse(res, 403, "not_approved", "Заявка ещё не одобрена");
+  if (!validNihilistSettings(req.body)) return refuse(res, 422, "invalid_nihilist_settings", "Выберите стороны и стратегии Нигилиста");
+  const key = `sub-${row.id}`;
+  const previous = await getNihilistSettings(key);
+  const settings = await saveNihilistSideSettings(key, req.body);
+  if (previous.sides !== settings.sides || previous.longStrategy !== settings.longStrategy || previous.shortStrategy !== settings.shortStrategy) {
+    notifyOwner(row, [`Nihilyst Crypto Trading: ${describeNihilistSettings(settings)}`]);
+  }
+  res.json({ settings });
 });
 router.post("/me/sources", async (req, res) => {
   const row = await subscriberFor(req);
@@ -542,7 +595,7 @@ router.post("/me/trading", async (req, res) => {
   const enable = req.body?.enabled === true;
   if (enable) {
     if (row.status !== "approved") return refuse(res, 403, "not_approved", "Заявка ещё не одобрена");
-    if (subscriptionEnded(row)) return refuse(res, 403, "subscription_ended", "Подписка закончилась — продлите её у владельца");
+    if (subscriptionEnded(row)) return refuse(res, 403, "subscription_ended", "Подписка закончилась — чтобы продлить доступ, напишите Люси");
     if (!row.api_key_verified_at) return refuse(res, 422, "no_key", "Сначала добавьте и проверьте ключ BingX");
     // A CAB strategy is needed only when the person trades CAB signals (Nihilist is led by the owner's rules).
     if (String(row.trade_sources ?? "cab").split(",").includes("cab") && !subscriberTradingStrategy(row)) {
@@ -647,13 +700,53 @@ router.get("/journal/subscribers", requireJournalSession, requireJournalOwner, a
   res.json({ subscribers: list, keysConfigured: subscriberKeysConfigured() });
 });
 
+router.post("/journal/subscribers/:id/sources", requireJournalSession, requireJournalOwner, async (req, res) => {
+  const params = SetSubscriberSourcesParams.safeParse(req.params);
+  if (!params.success) return refuse(res, 400, "invalid_subscriber_id", "Неверный идентификатор подписчика");
+  const body = SetSubscriberSourcesBody.safeParse(req.body);
+  if (!body.success) return refuse(res, 400, "invalid_sources", "Выберите Crypto Alts Bullet, Nihilyst Crypto Trading или оба бота");
+  if (new Set(body.data.sources).size !== body.data.sources.length) {
+    return refuse(res, 400, "duplicate_sources", "Каждый бот можно выбрать только один раз");
+  }
+
+  const sources = (["cab", "nihilist"] as const).filter((source) => body.data.sources.includes(source));
+  const value = sources.join(",");
+  const updated = await pool.query(
+    `UPDATE subscribers SET trade_sources = $2, version = version + 1, updated_at = now()
+     WHERE id = $1 AND status IN ('pending', 'approved')
+     RETURNING id, trade_sources`,
+    [params.data.id, value],
+  );
+  if (!updated.rowCount) {
+    const existing = await pool.query("SELECT id FROM subscribers WHERE id = $1", [params.data.id]);
+    if (!existing.rowCount) return refuse(res, 404, "not_found", "Подписчик не найден");
+    return refuse(res, 409, "subscription_not_editable", "Доступ можно менять только для новой заявки или одобренной подписки");
+  }
+
+  const row = updated.rows[0] as { id: number; trade_sources: string };
+  res.json(SetSubscriberSourcesResponse.parse({
+    id: Number(row.id),
+    tradeSources: String(row.trade_sources).split(",").filter(Boolean),
+  }));
+});
+
 router.post("/journal/subscribers/:id/decision", requireJournalSession, requireJournalOwner, async (req, res) => {
   const id = Number(req.params.id);
+  // Owner 2026-11-09: approval for a term — a date from the calendar (to the end of that day, Samara time) or N months.
+  const untilRaw = typeof req.body?.until === "string" ? req.body.until : "";
+  const months = Number(req.body?.months);
+  let term: Term = {};
+  if (untilRaw) {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(untilRaw)) return refuse(res, 422, "invalid_until", "Неверная дата");
+    const until = new Date(`${untilRaw}T23:59:59+04:00`);
+    if (!(until.getTime() > Date.now())) return refuse(res, 422, "until_in_past", "Дата окончания должна быть в будущем");
+    term = { until };
+  } else if (Number.isInteger(months) && months > 0 && months <= 24) term = { months };
   // "extend" = approve again: one more month (owner 2026-11-03, as CAB). The subscriber is told in Telegram.
   const raw = String(req.body?.decision ?? "");
   const decision = (raw === "extend" ? "approve" : raw) as Decision;
   if (!Number.isSafeInteger(id) || !["approve", "reject", "block", "unblock"].includes(decision)) return refuse(res, 422, "invalid_decision", "Неверное решение");
-  const out = await decide(id, decision, String(getAuth(req).userId ?? "owner"));
+  const out = await decide(id, decision, String(getAuth(req).userId ?? "owner"), term);
   if (!out) return refuse(res, 404, "not_found", "Подписчик не найден");
   res.json({ subscriber: publicView(out.row as Row) });
 });

@@ -85,16 +85,53 @@ test("end of subscription: 3 days, 1 day, ended → trading stops, owner gets «
   assert.equal(sentTo("111").length, 1); assert.match(sentTo("111")[0]!, /через 3 дня/);
   await pool.query("UPDATE subscribers SET subscribed_until = now() + interval '20 hours' WHERE id = $1", [s.id]);
   await expiryPass(); await expiryPass();
-  assert.equal(sentTo("111").length, 2); assert.match(sentTo("111")[1]!, /завтра/);
+  assert.equal(sentTo("111").length, 2); assert.match(sentTo("111")[1]!, /через сутки[\s\S]*напишите Люси/);
+  const reminder = calls.filter((c) => c.method === "sendMessage" && String(c.body.chat_id) === "111")[1]!;
+  assert.equal(reminder.body.reply_markup.inline_keyboard[0][0].text, "✍️ Продлить доступ — написать Люси");
   await pool.query("UPDATE subscribers SET subscribed_until = now() - interval '1 minute' WHERE id = $1", [s.id]);
   await expiryPass(); await expiryPass();
-  assert.equal(sentTo("111").length, 3); assert.match(sentTo("111")[2]!, /закончилась — торговля остановлена/);
+  assert.equal(sentTo("111").length, 3); assert.match(sentTo("111")[2]!, /закончилась — бот отключён от вашего API/);
   assert.equal((await pool.query("SELECT trading_enabled FROM subscribers WHERE id = $1", [s.id])).rows[0].trading_enabled, false);
   const owner = calls.filter((c) => c.method === "sendMessage" && String(c.body.chat_id) === "999");
   assert.equal(owner.length, 1);
-  assert.equal(owner[0]!.body.reply_markup.inline_keyboard[0][0].text, "🔄 Продлить на месяц");
+  assert.equal(owner[0]!.body.reply_markup.inline_keyboard[0][0].text, "🔄 +1 месяц");
   // Renewal after the end: a month from now, reminders start over.
   const r = await decide(s.id, "approve", "owner");
   assert.ok(new Date(r!.row.subscribed_until).getTime() > Date.now() + 27 * 86_400_000);
   assert.equal(r!.row.expiry_notice, null);
+});
+
+test("owner 2026-11-09: approval for a term — a calendar date or N months; Telegram «3 месяца»", async () => {
+  const s1 = await add();
+  const until = new Date(Date.now() + 45 * 86_400_000);
+  const a = await decide(s1.id, "approve", "owner", { until });
+  assert.equal(new Date(a!.row.subscribed_until).getTime(), until.getTime());
+  const s2 = await add("222");
+  await handleUpdate({ update_id: 9, callback_query: { id: "q9", data: `sub_approve:${s2.id}:3`, from: { id: 999 }, message: { message_id: 7, chat: { id: 999 } } } });
+  const u2 = new Date((await pool.query("SELECT subscribed_until FROM subscribers WHERE id = $1", [s2.id])).rows[0].subscribed_until);
+  assert.ok(u2.getTime() > Date.now() + 88 * 86_400_000 && u2.getTime() < Date.now() + 93 * 86_400_000, String(u2));
+});
+
+test("owner 2026-11-09: the owner's own row never gets a date and never expires", async () => {
+  process.env.JOURNAL_OWNER_USER_ID = "owner-user";
+  const o = (await pool.query("INSERT INTO subscribers (clerk_user_id, email, status, telegram_chat_id, subscribed_until) VALUES ('owner-user','o@x','pending','999', now() + interval '1 hour') RETURNING *")).rows[0];
+  const r = await decide(o.id, "approve", "owner");
+  assert.equal(r!.row.subscribed_until, null);
+  await pool.query("UPDATE subscribers SET subscribed_until = now() - interval '1 minute' WHERE id = $1", [o.id]);
+  await expiryPass();
+  assert.equal((await pool.query("SELECT expiry_notice FROM subscribers WHERE id = $1", [o.id])).rows[0].expiry_notice, null);
+  delete process.env.JOURNAL_OWNER_USER_ID;
+});
+
+test("owner 2026-11-09: the subscriber presses «Продлить доступ — написать Люси» → the owner gets the request with the term buttons; a stranger cannot", async () => {
+  const s = await add("111", "approved");
+  await pool.query("UPDATE subscribers SET subscribed_until = now() + interval '20 hours' WHERE id = $1", [s.id]);
+  await handleUpdate({ update_id: 11, callback_query: { id: "r0", data: `sub_renew_req:${s.id}`, from: { id: 333 }, message: { message_id: 1, chat: { id: 333 } } } });
+  assert.equal(calls.filter((c) => c.method === "sendMessage" && String(c.body.chat_id) === "999").length, 0);
+  await handleUpdate({ update_id: 12, callback_query: { id: "r1", data: `sub_renew_req:${s.id}`, from: { id: 111 }, message: { message_id: 2, chat: { id: 111 } } } });
+  const owner = calls.filter((c) => c.method === "sendMessage" && String(c.body.chat_id) === "999");
+  assert.equal(owner.length, 1);
+  assert.match(owner[0]!.body.text, /просит продлить доступ/);
+  assert.equal(owner[0]!.body.reply_markup.inline_keyboard[0][1].text, "🔄 +3 месяца");
+  assert.match(sentTo("111").at(-1)!, /Запрос отправлен Люси/);
 });

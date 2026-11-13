@@ -1,0 +1,3 @@
+- [Migration constraints](migration-constraints.md) — preserve the old trading bot unchanged; isolate all checks and never substitute an unverified GitHub version.
+- [Reconciliation alerts](reconciliation-alerts.md) — close owner REAL/VST orphan positions only after confirmed snapshots; cancel matching protection and deduplicate notices.
+- [Nihilist cabinet rules](nihilist-cabinet-rules.md) — personal long/short choices, backward-compatible defaults, no schema changes for these settings.

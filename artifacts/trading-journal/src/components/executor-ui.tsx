@@ -7,6 +7,9 @@ import { api } from "@/lib/subscriber-api";
 import type { BtcSettings } from "@/components/BtcCard";
 import { InboxLine, type InboxInfo, type SourceSettingsValue } from "@/components/SourceSettings";
 import { Link } from "wouter";
+import { BotBrand, BOT_BRAND_NAMES } from "@/components/BotBrand";
+import type { ExecutorTradingControlState } from "@workspace/api-client-react";
+import type { NihilistSettings } from "@/components/NihilistSideSettings";
 
 export type Trade = {
   id: number; accountId: string; source: string; sourceName: string; sourceSignalId: string; symbol: string; side: "long" | "short";
@@ -20,18 +23,45 @@ export type Trade = {
 export type NhSettings = { source: string; enabled: boolean; allocationMode: "percent" | "amount"; allocationValue: number; strategy: string; subscribers: boolean };
 export type Status = {
   enabled: boolean; asOf: string;
+  tradingControls?: ExecutorTradingControlState[];
   inbox: Record<"cab" | "nihilist", InboxInfo>;
   telegram: { pending: number; oldestPendingAt: string | null; failed24h: number; lastError: string | null; lastErrorAt: string | null; lastSentAt: string | null } | null;
   cab: { settings: SourceSettingsValue };
-  nihilist: { settings: NhSettings; strategies: Array<{ id: string; label: string }> };
+  nihilist: { settings: NhSettings; sideSettings: NihilistSettings; strategies: Array<{ id: string; label: string }> };
   btc: { settings: BtcSettings[]; maxLeverage: number };
   accounts: Array<{ id: string; label: string; env: string; strategy: string; takePct: number | null; balance: { equity: number; available: number } | null }>;
+  ownerAccount?: {
+    id: string; label: string; env: string; tradingEnabled: boolean;
+    balance: { equity: number; available: number } | null;
+    balanceStatus: "available" | "unavailable"; balanceError: string | null; checkedAt: string;
+  } | null;
   sync: Record<string, { at: string | null; ok: boolean | null; error: string | null }>;
   open: Trade[]; closed: Trade[]; skipped: Trade[];
-  totals: Array<{ accountId: string; source: string; sourceName: string; side: "long" | "short"; closed: number; wins: number; losses: number; liquidations: number; pnl: number }>;
+  totals: Array<{ accountId: string; source: string; sourceName: string; side: "long" | "short"; closed: number; wins: number; losses: number; liquidations: number; pnl: number; cancelled?: number; cancelledPnl?: number }>;
   skippedTotals: Array<{ source: string; sourceName: string; reason: string; reasonText: string; n: number }>;
 };
 type Events = { trade: Trade; events: Array<{ id: number; kind: string; detail: Record<string, unknown>; at: string }> };
+
+export const ownerAccountOf = (d: Status) =>
+  d.ownerAccount ?? d.accounts.find((account) => account.id === "owner-vst") ?? null;
+
+export function OwnerAccountNotice({ d }: { d: Status }) {
+  const account = d.ownerAccount;
+  if (account === undefined) return null;
+  if (account === null) {
+    return <p role="status" className="border border-border bg-card p-3 text-sm text-muted-foreground">Основной счёт BingX не настроен: нужны BINGX_API_KEY и BINGX_API_SECRET.</p>;
+  }
+  return (
+    <div role="status" data-testid="owner-account-status" className="space-y-1 border border-border bg-card p-3 text-sm">
+      <p>{account.balanceStatus === "available" ? "BingX VST: баланс доступен." : "Ключи BingX сохранены; подключение не подтверждено."}</p>
+      <p className={account.tradingEnabled && account.balanceStatus === "available" ? "text-success" : "text-amber-300"}>
+        {account.tradingEnabled ? "Приём новых сигналов разрешён." : "Новые входы основного счёта остановлены или заблокированы."}
+        {" "}<Link href="/journal/my-bot" className="underline">Управление — в «Мой кабинет»</Link>.
+      </p>
+      {account.balanceError && <p className="text-destructive">{account.balanceError}</p>}
+    </div>
+  );
+}
 
 export const dt = (v: string | null) =>
   v ? new Date(v).toLocaleString("ru-RU", { timeZone: "Europe/Samara", day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit" }) : "—";
@@ -73,9 +103,11 @@ export function useSourceFilter(): [SourceFilter, (v: SourceFilter) => void] {
 export function SourceSwitch({ value, onChange }: { value: SourceFilter; onChange: (v: SourceFilter) => void }) {
   return (
     <div role="tablist" aria-label="Источник сигналов" className="inline-grid grid-cols-3 border border-border bg-card">
-      {([["all", "Оба бота"], ["cab", "CAB"], ["nihilist", "Нигилист"]] as const).map(([id, label]) => (
-        <button key={id} role="tab" type="button" aria-selected={value === id} onClick={() => onChange(id)}
-          className={`min-h-11 px-4 text-sm font-bold ${value === id ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:bg-muted"}`}>{label}</button>
+      {(["all", "cab", "nihilist"] as const).map((id) => (
+        <button key={id} role="tab" type="button" aria-label={id === "all" ? "Оба бота" : BOT_BRAND_NAMES[id]} aria-selected={value === id} onClick={() => onChange(id)}
+          className={`flex min-h-12 min-w-0 items-center justify-center px-1.5 text-xs font-bold sm:px-3 ${value === id ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:bg-muted"}`}>
+          {id === "all" ? "Оба бота" : <BotBrand source={id} size="xs" />}
+        </button>
       ))}
     </div>
   );
@@ -110,11 +142,11 @@ export function SourcesStatus({ d }: { d: Status }) {
     <TelegramWarning d={d} />
     <div className="grid gap-3 sm:grid-cols-2">
       {(["cab", "nihilist"] as const).map((src) => {
-        const name = src === "cab" ? "CAB" : "Нигилист";
+        const name = BOT_BRAND_NAMES[src];
         const on = d[src].settings.enabled;
         return (
           <Link key={src} href="/journal/my-bot" className="block border border-border bg-card p-3 hover:border-primary/50">
-            <p className="text-sm font-bold">{name}</p>
+            <p className="text-sm font-bold"><BotBrand source={src} size="sm" /></p>
             <p className="mt-1 text-xs">Сигналы: <InboxLine name={name} info={d.inbox?.[src]} /></p>
             <p className="text-xs">Сделки: <span className={on ? "text-success" : "text-destructive"}>{on ? "открываются" : "не открываются (выключено)"}</span></p>
           </Link>
@@ -133,7 +165,7 @@ export function TotalsTable({ d, filter }: { d: Status; filter: SourceFilter }) 
     <div className="overflow-x-auto">
       <table className="w-full min-w-[640px] text-sm">
         <thead className="text-left text-[10px] uppercase text-muted-foreground">
-          <tr><th className="py-1 pr-3">Бот</th><th className="pr-3">Сторона</th><th className="pr-3">Сделок</th><th className="pr-3">В плюс</th><th className="pr-3">В минус</th><th className="pr-3">Доля плюсовых</th><th className="pr-3">Ликвидаций</th><th className="pr-3">Результат</th></tr>
+          <tr><th className="py-1 pr-3">Бот</th><th className="pr-3">Сторона</th><th className="pr-3">Сделок</th><th className="pr-3">В плюс</th><th className="pr-3">В минус</th><th className="pr-3">Доля плюсовых</th><th className="pr-3">Ликвидаций</th><th className="pr-3">Отмены источника</th><th className="pr-3">Результат</th></tr>
         </thead>
         <tbody>
           {rows.map((t) => (
@@ -141,8 +173,9 @@ export function TotalsTable({ d, filter }: { d: Status; filter: SourceFilter }) 
               <td className="py-1.5 pr-3 font-bold">{t.sourceName}</td>
               <td className={`pr-3 font-bold ${sideCls(t.side)}`}>{sideText(t.side)}</td>
               <td className="pr-3 tabular">{t.closed}</td><td className="pr-3 tabular text-success">{t.wins}</td><td className="pr-3 tabular text-destructive">{t.losses}</td>
-              <td className="pr-3 tabular">{t.closed ? `${Math.round((t.wins / t.closed) * 100)}%` : "—"}</td>
+              <td className="pr-3 tabular">{t.closed - (t.cancelled ?? 0) > 0 ? `${Math.round((t.wins / (t.closed - (t.cancelled ?? 0))) * 100)}%` : "—"}</td>
               <td className={`pr-3 tabular ${t.liquidations ? "font-bold text-destructive" : ""}`}>{t.liquidations}</td>
+              <td className="pr-3 tabular text-muted-foreground">{t.cancelled ? `${t.cancelled} · ${formatUsdt(t.cancelledPnl ?? 0)}` : "—"}</td>
               <td className={`pr-3 font-bold tabular ${toneClass(t.pnl)}`}>{formatUsdt(t.pnl)}</td>
             </tr>
           ))}
@@ -176,7 +209,7 @@ export function TradeTable({ rows, kind, empty }: { rows: Trade[]; kind: "open" 
                   <td className="px-2 py-2">{expanded ? <ChevronDown className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}</td>
                   <td className="px-2"><b>{t.symbol.replace(/USDT$/, "")}</b> <span className={`text-xs font-bold ${sideCls(t.side)}`}>{sideText(t.side)}</span></td>
                   <td className="px-2 text-xs">{t.sourceName}{t.pattern ? <span className="block text-muted-foreground">{t.pattern}</span> : null}
-                    {t.mgmtLabel ? <span className="block max-w-[220px] text-muted-foreground" title={t.mgmtLabel}>{t.mgmt === "source" ? "ведёт Нигилист" : t.mgmtLabel}</span> : null}</td>
+                    {t.mgmtLabel ? <span className="block max-w-[220px] text-muted-foreground" title={t.mgmtLabel}>{t.mgmt === "source" ? `ведёт ${BOT_BRAND_NAMES.nihilist}` : t.mgmtLabel}</span> : null}</td>
                   {kind === "open" && <>
                     <td className="px-2 text-xs tabular">{dt(t.openedAt ?? t.receivedAt)}</td>
                     <td className="px-2 text-xs tabular">{duration(t.openedAt, null)}</td>

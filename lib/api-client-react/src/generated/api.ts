@@ -25,6 +25,8 @@ import type {
   BingXLivePreflight,
   EnqueueSignalRequest,
   EnqueueSignalResponse,
+  ExecutorTradingControlInput,
+  ExecutorTradingControlState,
   GetJournalBingxLivePreflightParams,
   GetOwnerTradingResetParams,
   HealthStatus,
@@ -59,6 +61,8 @@ import type {
   SourceCommandAcknowledgement,
   SourceCommandInput,
   SourceCommandList,
+  SubscriberSourcesInput,
+  SubscriberSourcesResult,
   TradingStatus,
   UpdateTradingControlsRequest,
   VstReviewResolveClosedRequest,
@@ -93,6 +97,261 @@ const withQueryKey = <T extends object, K>(query: T, queryKey: K): T & { queryKe
   }
   return result;
 };
+
+export const getSetSubscriberSourcesUrl = (id: number,) => {
+
+
+
+
+  return `/api/journal/subscribers/${id}/sources`
+}
+
+/**
+ * Owner-only. Updates a pending request before approval or changes an existing subscriber's bot access without changing global bot settings.
+ * @summary Set the bots available to one subscriber
+ */
+export const setSubscriberSources = async (id: number,
+    subscriberSourcesInput: SubscriberSourcesInput, options?: Parameters<typeof customFetch>[1]): Promise<SubscriberSourcesResult> => {
+
+    const getHeaders = (h?: NonNullable<RequestInit['headers']>): Record<string, string | readonly string[]> => {
+    if (!h) return {};
+    if (h instanceof Headers) return Object.fromEntries(h.entries());
+    if (Symbol.iterator in h) {
+      return Object.fromEntries(
+        Array.from(h as Iterable<Iterable<string>>, (entry) => Array.from(entry) as [string, string]),
+      );
+    }
+    const headers: Record<string, string | readonly string[]> = {};
+    for (const [name, value] of Object.entries<string | readonly string[] | undefined>(h)) {
+      if (value !== undefined) headers[name] = value;
+    }
+    return headers;
+  };
+return customFetch<SubscriberSourcesResult>(getSetSubscriberSourcesUrl(id),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...getHeaders(options?.headers) },
+    body: JSON.stringify(subscriberSourcesInput)
+  }
+);}
+
+
+
+
+
+export const getSetSubscriberSourcesMutationKey = () => ['setSubscriberSources'] as const;
+
+export const getSetSubscriberSourcesMutationOptions = <TError = ErrorType<void>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof setSubscriberSources>>, TError,SetSubscriberSourcesMutationVariables, TContext>, request?: SecondParameter<typeof customFetch>}
+): UseMutationOptions<Awaited<ReturnType<typeof setSubscriberSources>>, TError,SetSubscriberSourcesMutationVariables, TContext> => {
+
+const mutationKey = getSetSubscriberSourcesMutationKey();
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof setSubscriberSources>>, SetSubscriberSourcesMutationVariables> = (props) => {
+          const {id,data} = props ?? {};
+
+          return  setSubscriberSources(id,data,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type SetSubscriberSourcesMutationResult = NonNullable<Awaited<ReturnType<typeof setSubscriberSources>>>
+    export type SetSubscriberSourcesMutationBody = BodyType<SubscriberSourcesInput>
+    export type SetSubscriberSourcesMutationError = ErrorType<void>
+    export type SetSubscriberSourcesMutationVariables = {id: number;data: BodyType<SubscriberSourcesInput>}
+
+    /**
+ * @summary Set the bots available to one subscriber
+ */
+export const useSetSubscriberSources = <TError = ErrorType<void>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof setSubscriberSources>>, TError,SetSubscriberSourcesMutationVariables, TContext>, request?: SecondParameter<typeof customFetch>}
+ ): UseMutationResult<
+        Awaited<ReturnType<typeof setSubscriberSources>>,
+        TError,
+        SetSubscriberSourcesMutationVariables,
+        TContext
+      > => {
+      return useMutation(getSetSubscriberSourcesMutationOptions(options));
+    }
+
+export const getGetExecutorTradingControlsUrl = () => {
+
+
+
+
+  return `/api/journal/executor/trading-controls`
+}
+
+/**
+ * @summary Owner-only effective VST trading controls
+ */
+export const getExecutorTradingControls = async ( options?: Parameters<typeof customFetch>[1]): Promise<ExecutorTradingControlState[]> => {
+
+  return customFetch<ExecutorTradingControlState[]>(getGetExecutorTradingControlsUrl(),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getGetExecutorTradingControlsQueryKey = () => {
+    return [
+    `/api/journal/executor/trading-controls`
+    ] as const;
+    }
+
+
+export const getGetExecutorTradingControlsQueryOptions = <TData = Awaited<ReturnType<typeof getExecutorTradingControls>>, TError = ErrorType<void>>( options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof getExecutorTradingControls>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getGetExecutorTradingControlsQueryKey();
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof getExecutorTradingControls>>> = ({ signal }) => getExecutorTradingControls({ signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof getExecutorTradingControls>>, TError, TData> & { queryKey: QueryKey }
+}
+
+export type GetExecutorTradingControlsQueryResult = NonNullable<Awaited<ReturnType<typeof getExecutorTradingControls>>>
+export type GetExecutorTradingControlsQueryError = ErrorType<void>
+
+
+/**
+ * @summary Owner-only effective VST trading controls
+ */
+
+export function useGetExecutorTradingControls<TData = Awaited<ReturnType<typeof getExecutorTradingControls>>, TError = ErrorType<void>>(
+  options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof getExecutorTradingControls>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+
+ ):  UseQueryResult<TData, TError> & { queryKey: QueryKey } {
+
+  const queryOptions = getGetExecutorTradingControlsQueryOptions(options)
+
+  const query = useQuery(queryOptions) as  UseQueryResult<TData, TError> & { queryKey: QueryKey };
+
+  return withQueryKey(query, queryOptions.queryKey);
+}
+
+
+
+
+
+
+
+export const getUpdateExecutorTradingControlUrl = () => {
+
+
+
+
+  return `/api/journal/executor/trading-controls`
+}
+
+/**
+ * @summary Owner enables or pauses new VST entries without restarting the service
+ */
+export const updateExecutorTradingControl = async (executorTradingControlInput: ExecutorTradingControlInput, options?: Parameters<typeof customFetch>[1]): Promise<ExecutorTradingControlState[]> => {
+
+    const getHeaders = (h?: NonNullable<RequestInit['headers']>): Record<string, string | readonly string[]> => {
+    if (!h) return {};
+    if (h instanceof Headers) return Object.fromEntries(h.entries());
+    if (Symbol.iterator in h) {
+      return Object.fromEntries(
+        Array.from(h as Iterable<Iterable<string>>, (entry) => Array.from(entry) as [string, string]),
+      );
+    }
+    const headers: Record<string, string | readonly string[]> = {};
+    for (const [name, value] of Object.entries<string | readonly string[] | undefined>(h)) {
+      if (value !== undefined) headers[name] = value;
+    }
+    return headers;
+  };
+return customFetch<ExecutorTradingControlState[]>(getUpdateExecutorTradingControlUrl(),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...getHeaders(options?.headers) },
+    body: JSON.stringify(executorTradingControlInput)
+  }
+);}
+
+
+
+
+
+export const getUpdateExecutorTradingControlMutationKey = () => ['updateExecutorTradingControl'] as const;
+
+export const getUpdateExecutorTradingControlMutationOptions = <TError = ErrorType<void>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof updateExecutorTradingControl>>, TError,UpdateExecutorTradingControlMutationVariables, TContext>, request?: SecondParameter<typeof customFetch>}
+): UseMutationOptions<Awaited<ReturnType<typeof updateExecutorTradingControl>>, TError,UpdateExecutorTradingControlMutationVariables, TContext> => {
+
+const mutationKey = getUpdateExecutorTradingControlMutationKey();
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof updateExecutorTradingControl>>, UpdateExecutorTradingControlMutationVariables> = (props) => {
+          const {data} = props ?? {};
+
+          return  updateExecutorTradingControl(data,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type UpdateExecutorTradingControlMutationResult = NonNullable<Awaited<ReturnType<typeof updateExecutorTradingControl>>>
+    export type UpdateExecutorTradingControlMutationBody = BodyType<ExecutorTradingControlInput>
+    export type UpdateExecutorTradingControlMutationError = ErrorType<void>
+    export type UpdateExecutorTradingControlMutationVariables = {data: BodyType<ExecutorTradingControlInput>}
+
+    /**
+ * @summary Owner enables or pauses new VST entries without restarting the service
+ */
+export const useUpdateExecutorTradingControl = <TError = ErrorType<void>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof updateExecutorTradingControl>>, TError,UpdateExecutorTradingControlMutationVariables, TContext>, request?: SecondParameter<typeof customFetch>}
+ ): UseMutationResult<
+        Awaited<ReturnType<typeof updateExecutorTradingControl>>,
+        TError,
+        UpdateExecutorTradingControlMutationVariables,
+        TContext
+      > => {
+      return useMutation(getUpdateExecutorTradingControlMutationOptions(options));
+    }
 
 export const getRequestOwnerTradingResetUrl = () => {
 

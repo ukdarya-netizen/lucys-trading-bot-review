@@ -4,23 +4,25 @@ import { HeartPulse, LogOut, LayoutDashboard, List, History, ShieldAlert, Termin
 import { useState } from "react";
 import { BrandLockup, BrandMark } from "@/components/brand";
 import JournalSubscribers from "./JournalSubscribers";
-import SubscriberCabinet from "./SubscriberCabinet";
+import SubscriberApp from "./subscriber/SubscriberApp";
 import { useGetJournalAccess, getGetJournalAccessQueryKey } from "@workspace/api-client-react";
 import TradeOverview from "./TradeOverview";
 import TradePositions from "./TradePositions";
 import TradeHistory from "./TradeHistory";
 import StrategiesPage from "./StrategiesPage";
+import SignalsPage from "./SignalsPage";
 import BotHealth from "./BotHealth";
 import { MainAccountToggles } from "@/components/SourceToggles";
 
 // Owner 2026-11-03: the trading bot has two signal sources (CAB and Nihilist); the main pages
 // show both with one switch. The old bot's pages are gone from the site (owner: not needed).
 const NAV_ITEMS = [
-  { group: "Торговля", href: "/journal/overview", label: "Обзор", short: "Обзор", sub: "результат CAB и Нигилиста", icon: LayoutDashboard },
+  { group: "Торговля", href: "/journal/overview", label: "Обзор", short: "Обзор", sub: "результат Crypto Alts Bullet и Nihilyst Crypto Trading", icon: LayoutDashboard },
+  { group: "Торговля", href: "/journal/signals", label: "Сигналы", short: "Сигналы", sub: "что пришло и что сделал бот", icon: Activity },
   { group: "Торговля", href: "/journal/positions", label: "Позиции", short: "Позиции", sub: "открытые сейчас", icon: Crosshair },
   { group: "Торговля", href: "/journal/trades", label: "История", short: "История", sub: "закрытые и не открытые", icon: History },
-  { group: "Управление", href: "/journal/bots", label: "CAB и Нигилист", short: "Боты", sub: "размер, стратегия, BTC", icon: SlidersHorizontal },
-  { group: "Управление", href: "/journal/my-bot", label: "Мой кабинет", short: "Кабинет", sub: "вкл/выкл торговли", icon: UserRound },
+  { group: "Управление", href: "/journal/bots", label: "Crypto Alts Bullet · Nihilyst Crypto Trading", short: "Боты", sub: "результаты стратегий", icon: SlidersHorizontal },
+  { group: "Управление", href: "/journal/my-bot", label: "Мой кабинет", short: "Кабинет", sub: "торговля, стратегия, BTC", icon: UserRound },
   { group: "Управление", href: "/journal/health", label: "Bot Health", short: "Health", sub: "работает ли бот, ошибки", icon: HeartPulse },
   { group: "Люди", href: "/journal/subscribers", label: "Подписчики", short: "Подписчики", sub: "заявки, сроки, боты", icon: Users },
 ] as const;
@@ -50,7 +52,7 @@ export default function JournalLayout() {
     return <div className="min-h-screen bg-background flex items-center justify-center p-4">
       <div className="max-w-md w-full border border-border bg-card p-8 space-y-5">
         <ShieldAlert className="w-10 h-10 text-primary" />
-        <h1 className="text-xl font-bold uppercase">Личный дневник</h1>
+        <h1 className="text-xl font-bold uppercase">Торговый дневник</h1>
         <p className="text-sm text-muted-foreground">Данные сделок доступны только владельцу после входа.</p>
         <Link href="/sign-in" className="block bg-primary text-primary-foreground text-center p-3 uppercase text-sm font-bold">Войти</Link>
       </div>
@@ -86,10 +88,10 @@ export default function JournalLayout() {
     );
   }
 
-  // Everyone who is not the owner gets the subscriber cabinet (request,
-  // approval wait, key, strategy, start/stop).
+  // Everyone who is not the owner gets the subscriber app (owner 2026-11-06): the cabinet page while
+  // not approved; once approved — Обзор, Позиции, История, Кабинет about their own account only.
   if (!access.authorized) {
-    return <SubscriberCabinet />;
+    return <SubscriberApp />;
   }
 
   const current = ALL_ITEMS.find((item) => item.href === location) ??
@@ -153,6 +155,7 @@ export default function JournalLayout() {
 
           <Switch>
              <Route path="/journal/overview" component={TradeOverview} />
+             <Route path="/journal/signals" component={SignalsPage} />
              <Route path="/journal/positions" component={TradePositions} />
              <Route path="/journal/trades" component={TradeHistory} />
              <Route path="/journal/bots" component={StrategiesPage} />
