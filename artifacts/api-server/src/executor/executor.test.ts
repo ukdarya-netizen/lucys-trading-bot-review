@@ -277,6 +277,23 @@ test("restart in the middle of an entry: the reconciler adopts the exchange posi
   assert.equal((await trade(7)).status, "closed");
 });
 
+test("owner 2026-11-13 (VELVET): an order whose sending timed out is looked up for 10 minutes before the trade fails; an entry not sent yet is left alone 3 minutes", async () => {
+  fake.setPrice("VELVET-USDT", 0.05);
+  await pool.query(`INSERT INTO ex_trades (account_id, source, source_signal_id, symbol, side, env, status, take_pct, signal_at, received_at, entry_sent_at, stop_price, client_order_id)
+    VALUES ('owner-vst','nihilist','nh-velvet-1','VELVETUSDT','short','vst','unknown',null, now(), now() - interval '4 minutes', now() - interval '3 minutes', 0.055, 'exvelvet1'),
+           ('owner-vst','nihilist','nh-velvet-2','VELVETUSDT','short','vst','opening',null, now(), now() - interval '1 minute', null, 0.055, null)`);
+  const st = async (id: string) => (await pool.query(`SELECT status FROM ex_trades WHERE source_signal_id = $1`, [id])).rows[0]?.status;
+  await ex.reconcileAll();
+  assert.equal(await st("nh-velvet-1"), "unknown", "3 minutes after the timed-out order: still looked up");
+  assert.equal(await st("nh-velvet-2"), "opening", "entry still being prepared: left alone");
+  await pool.query(`UPDATE ex_trades SET entry_sent_at = now() - interval '11 minutes' WHERE source_signal_id = 'nh-velvet-1'`);
+  sent.length = 0;
+  await ex.reconcileAll();
+  assert.equal(await st("nh-velvet-1"), "failed", "no order and no position after 10 minutes");
+  assert.match(sent.join("\n"), /ордер не дошёл до BingX/);
+  await pool.query(`UPDATE ex_trades SET status = 'failed' WHERE source_signal_id = 'nh-velvet-2'`);
+});
+
 test("liquidation drifts to the stop while open (funding ate the margin): the reconciler adds margin and says so", async () => {
   fake.setPrice("BIRB-USDT", 100);
   await ex.onSignal(sig(41, "BIRBUSDT", 91));

@@ -258,6 +258,7 @@ export function createBingX(opts: { env: Env; key: string; secret: string; fetch
   const RATE_RETRY_MAX_MS = 30_000;
   const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
   const RATE_TOTAL_MS = 120_000;
+  const READ_RETRY_DELAYS_MS = [1_000, 3_000];
   async function waitUnblocked(path: string, attempt = 0): Promise<void> {
     const until = blockedUntil.get(path) ?? 0;
     const ms = until - Date.now();
@@ -269,6 +270,7 @@ export function createBingX(opts: { env: Env; key: string; secret: string; fetch
     // again together — retried until it passes (with a small random spread), up to RATE_TOTAL_MS.
     const started = Date.now();
     let timestampRetries = 0;
+    let readRetries = 0;
     for (let attempt = 0; ; attempt++) {
       await waitUnblocked(path, attempt);
       try {
@@ -284,6 +286,14 @@ export function createBingX(opts: { env: Env; key: string; secret: string; fetch
         if (signed && canSyncClock && e instanceof BingXError && e.code === 109400 && timestampRetries === 0) {
           timestampRetries += 1;
           await syncClock();
+          continue;
+        }
+        // Owner 2026-11-13 (USELESS: one ticker timeout cancelled the entry): a READ that timed out or hit a
+        // network error is asked again (twice, after 1 s and 3 s) — repeating a GET changes nothing on the
+        // exchange. Orders (POST / DELETE) are never repeated blindly: their outcome is looked up instead.
+        if (method === "GET" && e instanceof BingXError && (e.kind === "timeout" || e.kind === "network") && readRetries < READ_RETRY_DELAYS_MS.length) {
+          await sleep(READ_RETRY_DELAYS_MS[readRetries]!);
+          readRetries += 1;
           continue;
         }
         if (!(e instanceof BingXError && e.kind === "rate")) throw e;

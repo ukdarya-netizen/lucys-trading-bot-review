@@ -55,6 +55,11 @@ export type CommandIn = {
 
 type Runtime = { acct: Account; ex: BingX; locks: Map<string, Promise<unknown>>; hedge?: boolean };
 
+/** Owner 2026-11-13: an entry not sent yet is left alone this long (it may wait on BingX limits up to 2 min). */
+export const ENTRY_PREPARE_GRACE_MS = 3 * 60_000;
+/** Owner 2026-11-13: an order whose sending timed out is looked up on every reconcile pass this long. */
+export const AMBIGUOUS_ENTRY_WINDOW_MS = 10 * 60_000;
+
 export const REASON_TEXT: Record<string, string> = {
   stale: "сигнал дошёл позже 10 минут после сообщения источника",
   already_in_position: "по монете уже открыта позиция",
@@ -67,7 +72,7 @@ export const REASON_TEXT: Record<string, string> = {
   below_min_notional: "сумма меньше минимальной на бирже",
   not_filled: "цена ушла больше чем на 0,5% — ордер не исполнился",
   entry_rejected: "биржа отклонила ордер",
-  entry_not_found: "ордер не найден на бирже",
+  entry_not_found: "ордер не дошёл до BingX: ни ордера, ни позиции на бирже",
   source_cancelled: "сигнал отменён источником",
   source_disabled: "торговля по этому источнику выключена в настройках",
   account_paused: "новые входы по счёту остановлены в кабинете",
@@ -1083,12 +1088,20 @@ export function createExecutor(deps: {
           if (after?.status === "open" && sourcePending(after.pending_close_reason)) await closeMarket(rt, after, after.pending_close_reason!);
           return;
         }
+        // Owner 2026-11-13 (VELVET: the order POST timed out, one lookup two minutes later failed the trade):
+        // an entry still being prepared (no order sent yet — it may wait on BingX limits up to 2 min) is left
+        // alone for 3 minutes; an order of unknown outcome is looked up on every pass for 10 minutes. A failed
+        // lookup (timeout, rate limit) is not an answer: the trade fails only when BingX itself says there is
+        // no such order and no position appeared within that time.
+        const sinceReceived = now() - cur.received_at.getTime();
+        if (cur.status === "opening" && !cur.entry_sent_at && sinceReceived < ENTRY_PREPARE_GRACE_MS) return;
         if (age > 120_000 || cur.status === "opening") {
           const sourceClosePending = sourcePending(cur.pending_close_reason);
+          let lookupFailed = false;
           const order = cur.client_order_id
             ? sourceClosePending
               ? await rt.ex.queryOrder(cur.symbol, { clientOrderId: cur.client_order_id })
-              : await rt.ex.queryOrder(cur.symbol, { clientOrderId: cur.client_order_id }).catch(() => null)
+              : await rt.ex.queryOrder(cur.symbol, { clientOrderId: cur.client_order_id }).catch(() => { lookupFailed = true; return null; })
             : null;
           if (sourceClosePending && order && ["NEW", "PARTIALLY_FILLED"].includes(order.status) && order.orderId) {
             await rt.ex.cancelOrder(cur.symbol, order.orderId);
@@ -1117,6 +1130,7 @@ export function createExecutor(deps: {
             }
             return;
           }
+          if (cur.client_order_id && (lookupFailed || age < AMBIGUOUS_ENTRY_WINDOW_MS)) return; // ask again next pass
           await fail(rt, cur, "entry_not_found");
         }
         return;
