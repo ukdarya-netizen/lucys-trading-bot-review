@@ -278,52 +278,6 @@ export async function saveSourceSettings(s: SourceSettings): Promise<SourceSetti
 }
 
 /**
- * Bitcoin is traded apart (owner 2026-11-03): for every user (owner and each
- * subscriber) and every source (CAB, Nihilist) — on/off, its own leverage
- * (50x unless changed) and its own size (null = the same size as other coins).
- * account_key: "owner" or "sub-<subscriber id>".
+ * Owner 2026-11-14: BTC settings per CAB / Nihilist (ex_btc_settings, 2026-11-03) are retired — Bitcoin is
+ * Bitcoin MM's bot (btcmm.ts); BTC from CAB / Nihilist is traded as any coin of that bot. The table stays (no DROP).
  */
-export const BTC_DEFAULT_LEVERAGE = 50;
-export const BTC_MAX_LEVERAGE = 125;
-export const BTC_SOURCES = ["cab", "nihilist"] as const;
-export type BtcSettings = {
-  source: string; enabled: boolean; leverage: number; allocationMode: "percent" | "amount" | null; allocationValue: number | null;
-};
-export const btcDefault = (source: string): BtcSettings =>
-  ({ source, enabled: true, leverage: BTC_DEFAULT_LEVERAGE, allocationMode: null, allocationValue: null });
-
-export async function getBtcSettings(accountKey: string): Promise<BtcSettings[]> {
-  await ensureExecutorTables();
-  const r = await pool.query("SELECT * FROM ex_btc_settings WHERE account_key = $1", [accountKey]);
-  return BTC_SOURCES.map((source) => {
-    const row = r.rows.find((x) => x.source === source);
-    if (!row) return btcDefault(source);
-    const mode = row.allocation_mode === "percent" || row.allocation_mode === "amount" ? row.allocation_mode : null;
-    return { source, enabled: row.enabled, leverage: Number(row.leverage), allocationMode: mode, allocationValue: mode ? Number(row.allocation_value) : null };
-  });
-}
-
-/** Validates and saves one source's BTC settings; returns an error code when the input is wrong. */
-export async function saveBtcSettings(accountKey: string, b: any): Promise<{ ok: true; settings: BtcSettings[] } | { ok: false; code: string }> {
-  if (!b || typeof b !== "object" || !BTC_SOURCES.includes(b.source)) return { ok: false, code: "invalid_source" };
-  if (typeof b.enabled !== "boolean") return { ok: false, code: "invalid_enabled" };
-  const leverage = Number(b.leverage);
-  if (!Number.isInteger(leverage) || leverage < 1 || leverage > BTC_MAX_LEVERAGE) return { ok: false, code: "invalid_leverage" };
-  let mode: "percent" | "amount" | null = null;
-  let value: number | null = null;
-  if (b.allocationMode !== null && b.allocationMode !== undefined && b.allocationMode !== "same") {
-    if (b.allocationMode !== "percent" && b.allocationMode !== "amount") return { ok: false, code: "invalid_allocation_mode" };
-    value = Number(b.allocationValue);
-    if (!Number.isFinite(value) || value <= 0 || (b.allocationMode === "percent" && value > 100)) return { ok: false, code: "invalid_allocation_value" };
-    mode = b.allocationMode;
-  }
-  await ensureExecutorTables();
-  await pool.query(
-    `INSERT INTO ex_btc_settings (account_key, source, enabled, leverage, allocation_mode, allocation_value, updated_at)
-     VALUES ($1,$2,$3,$4,$5,$6, now())
-     ON CONFLICT (account_key, source) DO UPDATE SET enabled = EXCLUDED.enabled, leverage = EXCLUDED.leverage,
-       allocation_mode = EXCLUDED.allocation_mode, allocation_value = EXCLUDED.allocation_value, updated_at = now()`,
-    [accountKey, b.source, b.enabled, leverage, mode, value],
-  );
-  return { ok: true, settings: await getBtcSettings(accountKey) };
-}

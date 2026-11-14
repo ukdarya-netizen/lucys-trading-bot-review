@@ -21,7 +21,7 @@ const NAV_ITEMS = [
   { group: "Торговля", href: "/journal/signals", label: "Сигналы", short: "Сигналы", sub: "что пришло и что сделал бот", icon: Activity },
   { group: "Торговля", href: "/journal/positions", label: "Позиции", short: "Позиции", sub: "открытые сейчас", icon: Crosshair },
   { group: "Торговля", href: "/journal/trades", label: "История", short: "История", sub: "закрытые и не открытые", icon: History },
-  { group: "Управление", href: "/journal/bots", label: "Crypto Alts Bullet · Nihilyst Crypto Trading", short: "Боты", sub: "результаты стратегий", icon: SlidersHorizontal },
+  { group: "Управление", href: "/journal/bots", label: "Crypto Alts Bullet · Nihilyst Crypto Trading · Bitcoin Margin Master", short: "Боты", sub: "результаты стратегий", icon: SlidersHorizontal },
   { group: "Управление", href: "/journal/my-bot", label: "Мой кабинет", short: "Кабинет", sub: "торговля, стратегия, BTC", icon: UserRound },
   { group: "Управление", href: "/journal/health", label: "Bot Health", short: "Health", sub: "работает ли бот, ошибки", icon: HeartPulse },
   { group: "Люди", href: "/journal/subscribers", label: "Подписчики", short: "Подписчики", sub: "заявки, сроки, боты", icon: Users },

@@ -5,7 +5,7 @@
  *   POST /api/trading/signals  → 202 {accepted:true, signal:{status:"pending"}}
  *   POST /api/trading/commands → 202 {stored:true, commandId}
  * Header x-trading-token = TRADING_INGEST_TOKEN (NIHILIST_TRADING_TOKEN for
- * the Nihilist source).
+ * the Nihilist source, BTC_TRADING_TOKEN for Bitcoin MM — owner 2026-11-14).
  */
 import { createHash, timingSafeEqual } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
@@ -17,23 +17,25 @@ function tokenOk(given: unknown, expected: string | undefined): boolean {
   if (typeof given !== "string" || !expected) return false;
   return timingSafeEqual(createHash("sha256").update(given).digest(), createHash("sha256").update(expected).digest());
 }
-const sourceOfToken = (given: unknown): "cab" | "nihilist" | null =>
+export type Source = "cab" | "nihilist" | "btc";
+const sourceOfToken = (given: unknown): Source | null =>
   tokenOk(given, process.env.TRADING_INGEST_TOKEN?.trim()) ? "cab"
-    : tokenOk(given, process.env.NIHILIST_TRADING_TOKEN?.trim()) ? "nihilist" : null;
+    : tokenOk(given, process.env.NIHILIST_TRADING_TOKEN?.trim()) ? "nihilist"
+    : tokenOk(given, process.env.BTC_TRADING_TOKEN?.trim()) ? "btc" : null;
+const ID_RE: Record<Source, RegExp> = { cab: /^cab-signal-[1-9]\d*$/, nihilist: /^nh-signal-[1-9]\d*$/, btc: /^btc-signal-[1-9]\d*$/ };
 
 const num = (v: unknown) => (typeof v === "number" ? v : typeof v === "string" && v.trim() !== "" ? Number(v) : NaN);
 
 export type Parsed<T> = { ok: true; value: T } | { ok: false; code: string };
 
-/** CAB: cab-signal-N, side "buy", stopLoss; Nihilist: nh-signal-N, side long/short, stopLoss. */
-export function parseSignal(b: any, source: "cab" | "nihilist", now: number): Parsed<SignalIn> {
+/** CAB: cab-signal-N, side "buy", stopLoss; Nihilist: nh-signal-N, side long/short, stopLoss; Bitcoin MM: btc-signal-N, BTCUSDT, leverage. */
+export function parseSignal(b: any, source: Source, now: number): Parsed<SignalIn> {
   if (!b || typeof b !== "object") return { ok: false, code: "invalid_payload" };
   const id = String(b.sourceSignalId ?? "");
-  const idOk = source === "cab" ? /^cab-signal-[1-9]\d*$/.test(id) : /^nh-signal-[1-9]\d*$/.test(id);
-  if (!idOk) return { ok: false, code: "invalid_signal_id" };
+  if (!ID_RE[source].test(id)) return { ok: false, code: "invalid_signal_id" };
   if (b.confirmationStatus !== undefined && b.confirmationStatus !== "confirmed") return { ok: false, code: "unconfirmed_signal" };
   const symbol = String(b.symbol ?? "").toUpperCase();
-  if (!/^[A-Z0-9]{1,30}USDT$/.test(symbol)) return { ok: false, code: "invalid_symbol" };
+  if (!/^[A-Z0-9]{1,30}USDT$/.test(symbol) || (source === "btc" && symbol !== "BTCUSDT")) return { ok: false, code: "invalid_symbol" };
   const sideRaw = String(b.side ?? "").toLowerCase();
   const side: Side | null = sideRaw === "buy" || sideRaw === "long" ? "long" : sideRaw === "sell" || sideRaw === "short" ? "short" : null;
   if (!side) return { ok: false, code: "invalid_side" };
@@ -58,6 +60,8 @@ export function parseSignal(b: any, source: "cab" | "nihilist", now: number): Pa
       signalAt, stop, receivedAt: now, releasedAt,
       // Nihilist's holding time (its exitRules), used when the bot manages the trade itself.
       maxHoldH: Number.isFinite(num(b.exitRules?.maxHoldHours)) && num(b.exitRules?.maxHoldHours) > 0 ? num(b.exitRules.maxHoldHours) : null,
+      // Bitcoin MM: the leverage of its profile (1D ×10, 4h ×20), the default unless the user set their own.
+      signalLeverage: Number.isInteger(num(b.leverage)) && num(b.leverage) >= 1 ? num(b.leverage) : null,
     },
   };
 }
@@ -68,7 +72,7 @@ export function parseCommand(b: any, now: number): Parsed<CommandIn> {
   const commandId = String(b.commandId ?? "");
   const sourceSignalId = String(b.sourceSignalId ?? "");
   if (!/^[A-Za-z0-9_-]{1,100}$/.test(commandId)) return { ok: false, code: "invalid_commandId" };
-  if (!/^(cab|nh)-signal-[1-9]\d*$/.test(sourceSignalId)) return { ok: false, code: "invalid_sourceSignalId" };
+  if (!/^(cab|nh|btc)-signal-[1-9]\d*$/.test(sourceSignalId)) return { ok: false, code: "invalid_sourceSignalId" };
   const type = String(b.type ?? "");
   if (type !== "close" && type !== "move_stop" && type !== "cancel_entry" && type !== "position_review") return { ok: false, code: "invalid_type" };
   const seqRaw = b.sequence ?? b.eventSeq;
@@ -126,6 +130,8 @@ export function createIntakeHandler(executor: Executor, opts: { now?: () => numb
       }
       const p = parseCommand(body, t);
       if (!p.ok) return send(res, 422, { stored: false, error: { code: p.code } });
+      // Bitcoin MM (owner 2026-11-14): its token commands only its signals, and only its token commands them.
+      if ((source === "btc") !== p.value.sourceSignalId.startsWith("btc-")) return send(res, 422, { stored: false, error: { code: "invalid_sourceSignalId" } });
       const fresh = await inboxPut("command", `cmd:${p.value.commandId}`, p.value.sourceSignalId, body);
       send(res, fresh ? 202 : 200, { stored: true, accepted: true, duplicate: !fresh, commandId: p.value.commandId });
       if (fresh) void executor.onCommand(p.value).catch((e) => log("executor: command failed", e));

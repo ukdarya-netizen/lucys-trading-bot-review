@@ -11,12 +11,13 @@ export type SubscriberSourcesInputSourcesItem = typeof SubscriberSourcesInputSou
 export const SubscriberSourcesInputSourcesItem = {
   cab: 'cab',
   nihilist: 'nihilist',
+  btc: 'btc',
 } as const;
 
 export interface SubscriberSourcesInput {
   /**
      * @minItems 1
-     * @maxItems 2
+     * @maxItems 3
      */
   sources: SubscriberSourcesInputSourcesItem[];
 }
@@ -27,13 +28,14 @@ export type SubscriberSourcesResultTradeSourcesItem = typeof SubscriberSourcesRe
 export const SubscriberSourcesResultTradeSourcesItem = {
   cab: 'cab',
   nihilist: 'nihilist',
+  btc: 'btc',
 } as const;
 
 export interface SubscriberSourcesResult {
   id: number;
   /**
      * @minItems 1
-     * @maxItems 2
+     * @maxItems 3
      */
   tradeSources: SubscriberSourcesResultTradeSourcesItem[];
 }

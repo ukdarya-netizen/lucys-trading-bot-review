@@ -25,7 +25,7 @@ import {
   takeFor, takePrice, topUpAmount, type Side,
 } from "./plan";
 import {
-  activeTrades, commandsForSignal, createTrade, event, getBtcSettings, getSourceSettings, symbolBusy, tradeById, tradesForSignal, updateTrade,
+  activeTrades, commandsForSignal, createTrade, event, getSourceSettings, symbolBusy, tradeById, tradesForSignal, updateTrade,
   updateTradeCommandSequence, type Trade,
 } from "./store";
 import { productionTrading } from "./trading-controls";
@@ -34,6 +34,7 @@ import { cancelKey, closeLine, isCancelReason, resultLine, sourceCloseKey, stopC
 import { parseCommand } from "./intake";
 import { sourceActionKind, sourceSyncConfirmed, type SourceSyncStatus } from "./source-state";
 import { getNihilistSettings } from "./nihilist-settings";
+import { getBtcMm, planBtcMm, reserveNeeded } from "./btcmm";
 
 export type SignalIn = {
   sourceSignalId: string; source: string; symbol: string; side: Side; pattern: string | null;
@@ -43,6 +44,8 @@ export type SignalIn = {
   releasedAt: number;
   /** Source's holding time in hours (Nihilist exitRules.maxHoldHours), null when none. */
   maxHoldH?: number | null;
+  /** Bitcoin MM: the leverage of its signal (the default unless the user set their own). */
+  signalLeverage?: number | null;
 };
 export type CommandIn = {
   commandId: string; sourceSignalId: string; symbol: string; type: "close" | "move_stop" | "cancel_entry" | "position_review";
@@ -77,6 +80,9 @@ export const REASON_TEXT: Record<string, string> = {
   source_disabled: "торговля по этому источнику выключена в настройках",
   account_paused: "новые входы по счёту остановлены в кабинете",
   btc_disabled: "торговля биткоином по этому источнику выключена в настройках",
+  btcmm_family_off: "этот паттерн выключен в настройках Bitcoin MM",
+  btcmm_unknown_pattern: "паттерн не из шаблона Bitcoin MM",
+  reserve_short: "не хватает запаса на добор маржи: ликвидация была бы раньше стопа",
   side_disabled: "сторона отключена",
   one_way_mode: "на счёте BingX включён односторонний режим позиций, а нужен раздельный (Hedge) — переключите в настройках фьючерсов BingX",
   error: "ошибка",
@@ -126,7 +132,7 @@ export function createExecutor(deps: {
   }
 
   // Every message names the signal source (owner 2026-11-03: two bots — CAB and Nihilist).
-  const SRC: Record<string, string> = { cab: "CAB", nihilist: "Нигилист" };
+  const SRC: Record<string, string> = { cab: "CAB", nihilist: "Нигилист", btc: "Bitcoin MM" };
   const head = (rt: Runtime, t: { symbol: string; source?: string }) =>
     `${t.source ? `${SRC[t.source] ?? t.source} · ` : ""}${t.symbol.replace(/-?USDT$/, "")} · ${rt.acct.label}`;
   const say = (text: string) => deps.send(text).catch(() => undefined);
@@ -518,17 +524,22 @@ export function createExecutor(deps: {
     const nh = sig.source === "nihilist" ? src : null;
     const nhSettings = nh ? await getNihilistSettings(a.subscriberId === null ? "owner" : `sub-${a.subscriberId}`, nh.strategy) : null;
     const mgmt = nhSettings ? nihilistStrategy(sig.side === "long" ? nhSettings.longStrategy : nhSettings.shortStrategy) : null;
+    // Bitcoin MM (owner 2026-11-14): its own settings — template per pattern family, size, leverage, margin reserve.
+    // Led by its commands (half at target 1 + stop to entry, the rest at target 2, holding time): no take of the bot.
+    const mm = sig.source === "btc" ? await getBtcMm(a.subscriberId === null ? "owner" : `sub-${a.subscriberId}`) : null;
+    const mmPlan = mm ? planBtcMm(mm, sig.pattern, sig.side, sig.signalLeverage ?? null) : null;
     const t = await createTrade({
       account_id: a.id, source: sig.source, source_signal_id: sig.sourceSignalId, symbol: sig.symbol, side: sig.side,
       // Nihilist manages its own exits (break-even +5%, trailing from +15%, holding time) by commands:
       // the account's take is not applied to it (owner 2026-11-03).
       // Nihilist: the take of its strategy (none when Nihilist leads); CAB: the account's take.
-      pattern: sig.pattern, env: a.env, take_pct: mgmt ? (mgmt.id === "source" ? null : mgmt.take) : takeFor(a.strategy, sig.symbol), signal_at: new Date(sig.signalAt),
+      pattern: sig.pattern, env: a.env, take_pct: mm ? null : mgmt ? (mgmt.id === "source" ? null : mgmt.take) : takeFor(a.strategy, sig.symbol), signal_at: new Date(sig.signalAt),
       received_at: new Date(sig.receivedAt), stop_price: sig.stop, mgmt: mgmt?.id ?? null, max_hold_h: sig.maxHoldH ?? null,
     });
     if (!t) return; // already handled
     try {
       if (nhSettings && nhSettings.sides !== "both" && nhSettings.sides !== sig.side) return skip(rt, t, "side_disabled", false);
+      if (mmPlan && "skip" in mmPlan) return skip(rt, t, mmPlan.skip, false);
       // The owner's per-bot on/off is checked in entryAllowed (owner 2026-11-06); src.enabled is no longer a gate.
       if (now() - sig.releasedAt > SIGNAL_TTL_MS) return skip(rt, t, "stale");
       if (sig.source === "cab" && a.strategy.patterns && (!sig.pattern || !a.strategy.patterns.has(sig.pattern))) return skip(rt, t, "pattern_not_in_strategy", false);
@@ -538,12 +549,9 @@ export function createExecutor(deps: {
         factors.set(t.id, mapped.factor);
       }
       if (await symbolBusy(a.id, sig.symbol, sig.side, t.id)) return skip(rt, t, "already_in_position");
-      // Bitcoin: its own settings per user and source (owner 2026-11-03) — 50x unless changed.
-      const btc = isBtc(sig.symbol)
-        ? (await getBtcSettings(a.subscriberId === null ? "owner" : `sub-${a.subscriberId}`)).find((x) => x.source === sig.source) ?? null
-        : null;
-      if (btc && !btc.enabled) return skip(rt, t, "btc_disabled", false);
-      const leverage = btc ? btc.leverage : LEVERAGE;
+      // Owner 2026-11-14: Bitcoin is Bitcoin MM's — its leverage from its settings; BTC from CAB / Nihilist as any coin (10x).
+      const plan = mmPlan && !("skip" in mmPlan) ? mmPlan : null;
+      const leverage = plan ? plan.leverage : LEVERAGE;
 
       // Hedge mode once per account (checked again after a failure).
       if (!rt.hedge) {
@@ -561,8 +569,8 @@ export function createExecutor(deps: {
         return skip(rt, t, "symbol_scale_mismatch", true, `${sigIn.symbol} → ${sig.symbol}: цена ${fmt(price)}, стоп после пересчёта ${fmt(sig.stop)}`);
       }
       // The owner's account takes Nihilist's own size; a subscriber keeps the size of their cabinet.
-      const margin = btc && btc.allocationMode && btc.allocationValue
-        ? marginFor({ ...a, allocation: { mode: btc.allocationMode, value: btc.allocationValue } }, bal.equity)
+      const margin = plan
+        ? marginFor({ ...a, allocation: plan.alloc }, bal.equity)
         : a.subscriberId === null ? marginFor({ ...a, allocation: { mode: src.allocationMode, value: src.allocationValue } }, bal.equity) : marginFor(a, bal.equity);
       if (!(margin > 0) || margin > bal.available) return skip(rt, t, "no_funds", true, `нужно ${margin.toFixed(2)}, свободно ${fmt(bal.available)}`);
       // The exchange's cap on position value at this leverage (101209): the size is cut to it, never rejected.
@@ -573,6 +581,15 @@ export function createExecutor(deps: {
       if (capped) await event(a.id, t, "size_capped", { wanted, cap });
       await updateTrade(t.id, { leverage });
       if ("error" in size) return skip(rt, t, size.error);
+      // Bitcoin MM: the margin reserve — when liquidation would come before the stop and the top-up is more than
+      // the user allowed, the trade is not opened (owner 2026-11-14), with how much is missing.
+      if (plan && mm && mm.reserve !== null) {
+        const need = reserveNeeded({ side: sig.side, entry: price, stop: sig.stop, qty: Number(size.qty), leverage });
+        if (need > mm.reserve) {
+          return skip(rt, t, "reserve_short", true,
+            `нужно долить ≈${need.toFixed(2)} USDT, запас ${mm.reserve.toFixed(2)} — увеличьте запас на ${(need - mm.reserve).toFixed(2)} или уменьшите плечо`);
+        }
+      }
 
       const cid = clientId(rt, sig.sourceSignalId);
       const params = {
@@ -669,7 +686,8 @@ export function createExecutor(deps: {
         mapNote,
         cur.take_price ? `Тейк ${fmt(cur.take_price)} (+${cur.take_pct}%)`
           : takeError ? `Тейк +${cur.take_pct}% не выставлен: ${takeError}. Бот повторит через 20 с` : "Тейка нет: выход по стопу и командам источника",
-        cur.mgmt && cur.mgmt !== "source" ? `Ведёт торговый бот: ${nihilistStrategy(cur.mgmt).label}` : cur.mgmt === "source" ? "Ведёт Нигилист: его стопы и закрытия" : "",
+        cur.source === "btc" ? "Ведёт Bitcoin MM: 50% на цели 1 и стоп в безубыток, остаток на цели 2, время удержания"
+          : cur.mgmt && cur.mgmt !== "source" ? `Ведёт торговый бот: ${nihilistStrategy(cur.mgmt).label}` : cur.mgmt === "source" ? "Ведёт Нигилист: его стопы и закрытия" : "",
         late !== null ? `Ордер отправлен через ${late.toFixed(1)} с после получения сигнала` : "",
       ].filter(Boolean).join("\n"));
     }
@@ -1027,7 +1045,6 @@ export function createExecutor(deps: {
   /** A close the source asked for (its close or its cancellation) waits on this trade. */
   const sourcePending = (r: string | null | undefined) => Boolean(r && (r.startsWith("source") || isCancelReason(r)));
   const missingAtSource = new Map<string, number>();
-  const isBtc = (symbol: string) => /^BTC-?USDT$/.test(symbol);
 
   /**
    * Commands stored in the inbox with a sequence after the last applied one, in order. Of several stop moves

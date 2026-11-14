@@ -1,6 +1,7 @@
 // «Мой кабинет» (owner 2026-11-04): every setting of the main account in one place — one tab per signal
-// bot (as the subscriber cabinet): open trades on/off, trade size, how trades are led, Bitcoin.
-// «CAB и Нигилист» only shows the strategies' results. Which bots subscribers may choose — on «Подписчики».
+// bot (as the subscriber cabinet): open trades on/off, trade size, how trades are led. Owner 2026-11-14: Bitcoin is the
+// third bot's (Bitcoin Margin Master) — its own tab; the BTC cards of CAB and Nihilist are gone (BTC there = any coin).
+// «Боты» only shows the strategies' results. Which bots subscribers may choose — on «Подписчики».
 import { useEffect, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link } from "wouter";
@@ -8,17 +9,17 @@ import { Switch } from "@/components/ui/switch";
 import { api, ApiFailure } from "@/lib/subscriber-api";
 import { LoadingOrError, useExecutor, type Status } from "@/components/executor-ui";
 import { InboxLine } from "@/components/SourceSettings";
-import { BtcCard, defaultBtc } from "@/components/BtcCard";
+import { BtcMmReport, BtcMmSettings } from "@/components/BtcMm";
 import { OwnerStrategyCard } from "@/components/owner-strategy-card";
 import { NihilistSideSettings } from "@/components/NihilistSideSettings";
 import { SizeInput, marginOf, num } from "@/components/form-bits";
-import { BotBrand, BOT_BRAND_NAMES, type BotSource } from "@/components/BotBrand";
+import { BotBrand, BOT_BRAND_NAMES, BOT_SOURCES, type BotSource } from "@/components/BotBrand";
 
 const LEVERAGE = 10;
 
 type Source = BotSource;
 const NAME = BOT_BRAND_NAMES;
-const SOURCES: Source[] = ["cab", "nihilist"];
+const SOURCES: Source[] = BOT_SOURCES;
 
 function useToggle(onDone: () => void) {
   const [msg, setMsg] = useState<{ text: string; bad: boolean } | null>(null);
@@ -30,14 +31,13 @@ function useToggle(onDone: () => void) {
   return { save: m.mutate, pending: m.isPending, msg };
 }
 
-const sizeText = (mode: "percent" | "amount", value: number, asset: string) => (mode === "percent" ? `${value}% от баланса` : `${value} ${asset}`);
 
 /** «Мой кабинет», owner only. Owner 2026-11-06: each bot has its OWN account (PAPER / VST / REAL), its own
  * on/off and its own size — CAB can trade REAL while Nihilist stays on VST, or one bot can be off. One BingX key. */
 export function MainAccountToggles() {
   const ex = useExecutor();
   const acc = useOwnerAccount();
-  const [tab, setTab] = useState<Source>(() => { try { return localStorage.getItem("cabinet-tab") === "nihilist" ? "nihilist" : "cab"; } catch { return "cab"; } });
+  const [tab, setTab] = useState<Source>(() => { try { const v = localStorage.getItem("cabinet-tab"); return v === "nihilist" || v === "btc" ? v : "cab"; } catch { return "cab"; } });
   const choose = (t: Source) => { setTab(t); try { localStorage.setItem("cabinet-tab", t); } catch { /* private mode */ } };
   const d = ex.data;
   // Never an empty page: while loading or on an error, say so (owner 2026-11-04).
@@ -57,7 +57,7 @@ export function MainAccountToggles() {
           <Link href="/journal/bots" onClick={() => { try { localStorage.setItem("strategies-tab", tab); } catch { /* private mode */ } }} className="text-primary underline">на странице «Боты»</Link>.
         </p>
         {bots && (
-          <div className="grid gap-2 sm:grid-cols-2">
+          <div className="grid gap-2 sm:grid-cols-3">
             {SOURCES.map((s) => (
               <button key={s} type="button" onClick={() => choose(s)} className="flex items-center justify-between gap-2 border border-border bg-background p-3 text-left">
                 <BotBrand source={s} size="xs" />
@@ -83,14 +83,13 @@ export function MainAccountToggles() {
       </div>
       {acc.data ? <BotTrading key={`t-${tab}`} source={tab} d={d} info={acc.data} onSaved={refetch} />
         : <p className={`text-sm ${acc.error ? "text-destructive" : "text-muted-foreground"}`}>{acc.error ? `Счета не загрузились: ${(acc.error as Error).message}` : "Загрузка счетов…"}</p>}
-      {tab === "cab" ? <OwnerStrategyCard /> : <NihilistStrategyChoice d={d} onSaved={refetch} />}
-      <BtcCard key={`b-${tab}-${mode}`} title={`Биткоин (BTC) · ${NAME[tab]}`}
-        saved={d.btc.settings.find((b) => b.source === tab) ?? defaultBtc(tab)} maxLeverage={d.btc.maxLeverage}
-        savePath="/journal/executor/btc-settings" onSaved={refetch}
-        otherMargin={marginOf(d[tab].settings.allocationMode, d[tab].settings.allocationValue, account?.balance?.equity ?? null)}
-        otherText={sizeText(d[tab].settings.allocationMode, d[tab].settings.allocationValue, asset)}
-        equity={account?.balance?.equity ?? null} asset={asset}
-        note={tab === "cab" ? `Ведение BTC — по правилам ${NAME.cab} при любой стратегии.` : `Ведение BTC — по выбранной стратегии ${NAME.nihilist}.`} />
+      {tab === "cab" ? <OwnerStrategyCard /> : tab === "nihilist" ? <NihilistStrategyChoice d={d} onSaved={refetch} /> : (
+        <>
+          <BtcMmSettings key={`mm-${mode}`} saved={d.btc.mm} families={d.btc.families} maxLeverage={d.btc.maxLeverage}
+            savePath="/journal/executor/btcmm-settings" onSaved={refetch} equity={account?.balance?.equity ?? null} asset={asset} ownerNote />
+          <BtcMmReport families={d.btc.families} />
+        </>
+      )}
     </div>
   );
 }
@@ -217,7 +216,7 @@ function BotSwitch({ source, info, onSaved }: { source: Source; info: OwnerAccou
         <Switch checked={bot.enabled} disabled={m.isPending || (!bot.enabled && Boolean(bot.blockedReason))} aria-label={`Открывать новые сделки ${NAME[source]}`}
           onCheckedChange={(v) => m.mutate(v)} />
       </label>
-      <p className="text-xs text-muted-foreground">Только этот бот: второй не затрагивается. Выключение не закрывает открытые сделки — бот ведёт их до закрытия.</p>
+      <p className="text-xs text-muted-foreground">Только этот бот: другие не затрагиваются. Выключение не закрывает открытые сделки — бот ведёт их до закрытия.</p>
       {bot.blockedReason && <p className="text-xs text-amber-300">{bot.blockedReason}</p>}
       {msg && <p className={`text-xs ${msg.bad ? "text-destructive" : "text-success"}`}>{msg.text}</p>}
     </div>
@@ -232,7 +231,8 @@ function BotTrading({ source, d, info, onSaved }: { source: Source; d: Status; i
       <p className="text-xs">Сигналы: <InboxLine name={NAME[source]} info={d.inbox?.[source]} /></p>
       <BotAccountChoice source={source} info={info} onSaved={onSaved} />
       <div className="border-t border-border pt-3"><BotSwitch source={source} info={info} onSaved={onSaved} /></div>
-      <SizeEditor source={source} d={d} mode={mode} onSaved={onSaved} />
+      {/* Bitcoin MM: its size, leverage and reserve are in its own card below. */}
+      {source !== "btc" && <SizeEditor source={source} d={d} mode={mode} onSaved={onSaved} />}
     </section>
   );
 }
@@ -269,7 +269,7 @@ function SizeEditor({ source, d, mode: accountMode, onSaved }: { source: Source;
   });
   return (
     <div className="space-y-2 border-t border-border pt-3">
-      <p className="text-xs uppercase text-muted-foreground">Размер сделки (кроме BTC)</p>
+      <p className="text-xs uppercase text-muted-foreground">Размер сделки</p>
       <SizeInput mode={mode} value={value} asset={asset}
         onMode={(m) => { setMode(m); setValue(m === "percent" ? 1 : Math.max(10, Math.round(margin ?? 10))); setMsg(null); }}
         onValue={(v) => { setValue(v); setMsg(null); }} />
@@ -298,7 +298,7 @@ export function SubscriberAccessToggles() {
     <section className="space-y-3 border border-border bg-card p-5" data-testid="subscriber-access">
       <h2 className="text-base font-bold">Какие боты доступны подписчикам</h2>
       <p className="text-xs text-muted-foreground">Выключенный бот подписчик не сможет выбрать в своём кабинете.</p>
-      <div className="grid gap-3 sm:grid-cols-2">
+      <div className="grid gap-3 sm:grid-cols-3">
         {SOURCES.map((s) => {
           const settings = d[s].settings;
           return (

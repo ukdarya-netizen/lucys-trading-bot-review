@@ -66,14 +66,15 @@ export async function ownerAccountRow(): Promise<OwnerAccountRow | null> {
  * Stored as reserved rows of ex_source_settings (no DDL): source = __owner_account_<bot>__, mode in `strategy`.
  * A bot without a row keeps the mode the main account had before (ex_owner_account.mode, default VST).
  */
-export const BOTS = ["cab", "nihilist"] as const;
+export const BOTS = ["cab", "nihilist", "btc"] as const; // owner 2026-11-14: Bitcoin MM, the third bot
 export type Bot = typeof BOTS[number];
+export const isBot = (v: unknown): v is Bot => typeof v === "string" && (BOTS as readonly string[]).includes(v);
 const botAccountKey = (bot: Bot) => `__owner_account_${bot}__`;
 const isMode = (v: unknown): v is OwnerMode => v === "paper" || v === "vst" || v === "real";
 
 export async function ownerBotModes(row: OwnerAccountRow | null): Promise<Record<Bot, OwnerMode>> {
   const fallback: OwnerMode = isMode(row?.mode) ? row!.mode : "vst";
-  const out: Record<Bot, OwnerMode> = { cab: fallback, nihilist: fallback };
+  const out: Record<Bot, OwnerMode> = { cab: fallback, nihilist: fallback, btc: fallback };
   try {
     const r = await pool.query<{ source: string; strategy: string }>(
       "SELECT source, strategy FROM ex_source_settings WHERE source = ANY($1::text[]) AND source NOT LIKE 'nihilist_sides:%'", [BOTS.map(botAccountKey)]);

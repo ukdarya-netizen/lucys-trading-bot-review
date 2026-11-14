@@ -10,6 +10,14 @@
 @import "@fontsource/exo-2/900-italic.css";
 @import "@fontsource/space-mono/400.css";
 @import "@fontsource/space-mono/700.css";
+/* Bitcoin Margin Master's own lettering (owner 2026-11-14), Apache 2.0, Latin only — its name is Latin. */
+@font-face {
+  font-family: "Permanent Marker";
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url("./fonts/permanent-marker-latin-400-normal.woff2") format("woff2");
+}
 @import '@clerk/themes/shadcn.css';
 @import 'tw-animate-css';
 @plugin "@tailwindcss/typography";
@@ -443,7 +451,7 @@
   box-shadow: 0 0 14px hsl(var(--glow) / .25);
 }
 
-/* Source identities: Exo 2 for Crypto Alts Bullet; Space Mono for Nihilyst. */
+/* Source identities: Exo 2 for Crypto Alts Bullet; Space Mono for Nihilyst; Permanent Marker in gold for Bitcoin Margin Master. */
 .bot-brand {
   display: inline-flex;
   min-width: 0;
@@ -489,3 +497,31 @@
   text-transform: uppercase;
   text-shadow: 0 0 10px rgb(255 36 49 / .35);
 }
+
+/* Bitcoin Margin Master (owner 2026-11-14): its gold, its badger, its marker lettering — as on its own site. */
+.bot-brand--btc .bot-brand-avatar {
+  border: 1px solid rgb(242 177 15 / .8);
+  box-shadow: 0 0 12px rgb(242 177 15 / .4);
+}
+.bot-brand--btc .bot-brand-name {
+  font-family: "Permanent Marker", var(--app-font-sans);
+  font-weight: 400;
+  letter-spacing: .02em;
+  background: linear-gradient(180deg, #ffd85a 0%, #f2b10f 45%, #b77d06 100%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  filter: drop-shadow(0 0 8px rgb(242 177 15 / .3));
+}
+.btcmm-card {
+  border: 1px solid rgb(242 177 15 / .28);
+  background: linear-gradient(180deg, rgb(28 22 12 / .85), rgb(12 10 7 / .92));
+  box-shadow: 0 0 0 1px rgb(0 0 0 / .4) inset, 0 10px 30px -18px rgb(242 177 15 / .3);
+}
+.btcmm-card h2, .btcmm-card h3 { color: #ffd85a; }
+.btcmm-gold { color: #f2b10f; }
+.btcmm-row { border: 1px solid rgb(242 177 15 / .16); background: rgb(12 10 7 / .6); }
+.btcmm-row[data-off="true"] { opacity: .55; }
+.btcmm-card [aria-pressed="true"] { background: #f2b10f; color: #1a1306; }
+.btcmm-best { color: #ffd85a; font-weight: 700; }
+.btcmm-card button[role="switch"][data-state="checked"] { background: #f2b10f; }

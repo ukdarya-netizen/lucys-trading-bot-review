@@ -3,11 +3,11 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { SubscriberAccessToggles } from "@/components/SourceToggles";
 import { Check, Pause, Play, ShieldOff, X } from "lucide-react";
 import { formatUsdt, toneClass } from "@/lib/performance";
-import { BotBrand, BOT_BRAND_NAMES, type BotSource } from "@/components/BotBrand";
+import { BotBrand, BOT_BRAND_NAMES, BOT_SOURCES, type BotSource } from "@/components/BotBrand";
 import { api, ApiFailure, positionSettingsText, runtimeText, type Subscription } from "@/lib/subscriber-api";
 
 type SrcStat = { closed: number; pnl: number };
-type Row = Subscription & { stats: { closed: number; netUsdt: number; openPositions: number; bySource: { cab: SrcStat; nihilist: SrcStat } } };
+type Row = Subscription & { stats: { closed: number; netUsdt: number; openPositions: number; bySource: { cab: SrcStat; nihilist: SrcStat; btc?: SrcStat } } };
 
 const STATUS: Record<Subscription["status"], { label: string; cls: string }> = {
   pending: { label: "Ждёт решения", cls: "border-amber-400/40 bg-amber-400/10 text-amber-300" },
@@ -59,7 +59,7 @@ function TermPicker({ row, label, busy, onPick }: { row: Row; label: string; bus
 }
 
 function normalizedSources(sources: string[] | null | undefined): BotSource[] {
-  return (["cab", "nihilist"] as const).filter((source) => (sources ?? ["cab"]).includes(source));
+  return BOT_SOURCES.filter((source) => (sources ?? ["cab"]).includes(source));
 }
 
 function sameSources(a: BotSource[], b: BotSource[]) {
@@ -138,7 +138,7 @@ export default function JournalSubscribers() {
       : [...selected, source];
     setSourceDrafts((current) => ({
       ...current,
-      [row.id]: (["cab", "nihilist"] as const).filter((item) => next.includes(item)),
+      [row.id]: BOT_SOURCES.filter((item) => next.includes(item)),
     }));
   };
   const rows = query.data?.subscribers ?? [];
@@ -168,9 +168,10 @@ export default function JournalSubscribers() {
               <p className="flex flex-wrap gap-1">{currentSources(row).map((source) => <span key={source} className="border border-primary/40 px-1.5 text-[11px] font-bold text-primary">{BOT_BRAND_NAMES[source]}</span>)}</p>
               <p className="text-[11px] text-muted-foreground">{row.stats.openPositions} откр.</p></div>
             <div><p className="text-[10px] uppercase text-muted-foreground">Результат</p>
-              {(["cab", "nihilist"] as const).map((s) => (
-                <p key={s} className="text-[11px]">{s === "cab" ? BOT_BRAND_NAMES.cab : BOT_BRAND_NAMES.nihilist}: {row.stats.bySource[s].closed} сд. · <b className={`tabular ${toneClass(row.stats.bySource[s].closed ? row.stats.bySource[s].pnl : null)}`}>{row.stats.bySource[s].closed ? formatUsdt(row.stats.bySource[s].pnl) : "—"}</b></p>
-              ))}</div>
+              {BOT_SOURCES.map((s) => {
+                const st = row.stats.bySource[s] ?? { closed: 0, pnl: 0 };
+                return <p key={s} className="text-[11px]">{BOT_BRAND_NAMES[s]}: {st.closed} сд. · <b className={`tabular ${toneClass(st.closed ? st.pnl : null)}`}>{st.closed ? formatUsdt(st.pnl) : "—"}</b></p>;
+              })}</div>
           </div>
         )}
         {row.status === "approved" && <p className="mt-2 text-xs text-muted-foreground">{state.text}</p>}
@@ -180,7 +181,7 @@ export default function JournalSubscribers() {
               {row.status === "pending" ? "Доступ при одобрении" : "Доступные боты для подписчика"}
             </legend>
             <div className="flex flex-wrap gap-2">
-              {(["cab", "nihilist"] as const).map((source) => (
+              {BOT_SOURCES.map((source) => (
                 <label key={source} className={`flex min-h-11 cursor-pointer items-center border px-3 py-2 transition-colors ${
                   selected.includes(source) ? "border-primary/50 bg-primary/5" : "border-border hover:bg-muted"
                 }`}>
@@ -197,7 +198,7 @@ export default function JournalSubscribers() {
               ))}
             </div>
             <p className="mt-2 text-[11px] text-muted-foreground">
-              Можно выбрать один бот или оба. Общие настройки владельца остаются верхним ограничением; открытые позиции не закрываются при смене доступа.
+              Можно выбрать один бот или несколько. Общие настройки владельца остаются верхним ограничением; открытые позиции не закрываются при смене доступа.
             </p>
             {selected.length === 0 && <p className="mt-1 text-xs text-destructive">Выберите хотя бы один бот.</p>}
             {row.status === "approved" && sourcesChanged && (

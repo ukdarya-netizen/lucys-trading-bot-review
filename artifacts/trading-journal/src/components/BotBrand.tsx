@@ -1,13 +1,16 @@
-export type BotSource = "cab" | "nihilist";
+export type BotSource = "cab" | "nihilist" | "btc";
+export const BOT_SOURCES: BotSource[] = ["cab", "nihilist", "btc"];
 
 export const BOT_BRAND_NAMES: Record<BotSource, string> = {
   cab: "Crypto Alts Bullet",
   nihilist: "Nihilyst Crypto Trading",
+  btc: "Bitcoin Margin Master",
 };
 
 const BOT_AVATARS: Record<BotSource, string> = {
   cab: `${import.meta.env.BASE_URL}brands/crypto-alts-bullet.png`,
   nihilist: `${import.meta.env.BASE_URL}brands/nihilyst-crypto-trading.jpeg`,
+  btc: `${import.meta.env.BASE_URL}brands/bitcoin-margin-master.webp`,
 };
 
 /** Bot mark and its distinct display typography; source IDs stay unchanged. */

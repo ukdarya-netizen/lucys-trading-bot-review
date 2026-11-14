@@ -3,7 +3,8 @@ import { Router, type IRouter, type Request, type Response } from "express";
 import { pool } from "@workspace/db";
 import { SetSubscriberSourcesBody, SetSubscriberSourcesParams, SetSubscriberSourcesResponse } from "@workspace/api-zod";
 import { announceRequest, botUsername, decide, isOwnerRow, send as sendTelegram, TEXT as SUB_TEXT, type Decision, type Term } from "../lib/subscriber-bot";
-import { BTC_MAX_LEVERAGE, getBtcSettings, getSourceSettings, saveBtcSettings } from "../executor/store";
+import { getSourceSettings } from "../executor/store";
+import { BTC_MAX_LEVERAGE, FAMILIES, describeBtcMm, getBtcMm, saveBtcMm } from "../executor/btcmm";
 import { closeReasonText } from "../executor/texts";
 import { subscriberTrades } from "../lib/subscriber-trades";
 import { cabReport, nihilistCall } from "./executor";
@@ -11,8 +12,9 @@ import { nihilistStrategies, nihilistStrategy } from "../executor/plan";
 import { describeNihilistSettings, getNihilistSettings, saveNihilistSideSettings, validNihilistSettings } from "../executor/nihilist-settings";
 
 type SrcStat = { closed: number; pnl: number };
-async function executorStatsByAccount(): Promise<Map<string, { cab: SrcStat; nihilist: SrcStat; open: number }>> {
-  const out = new Map<string, { cab: SrcStat; nihilist: SrcStat; open: number }>();
+type StatSrc = "cab" | "nihilist" | "btc";
+async function executorStatsByAccount(): Promise<Map<string, Record<StatSrc, SrcStat> & { open: number }>> {
+  const out = new Map<string, Record<StatSrc, SrcStat> & { open: number }>();
   try {
     const { rows } = await pool.query(
       `SELECT account_id, source, count(*) FILTER (WHERE status = 'closed')::int AS closed,
@@ -20,8 +22,8 @@ async function executorStatsByAccount(): Promise<Map<string, { cab: SrcStat; nih
               count(*) FILTER (WHERE status IN ('open','closing','opening','unknown'))::int AS open
        FROM ex_trades WHERE account_id LIKE 'sub-%' GROUP BY 1, 2`);
     for (const r of rows as any[]) {
-      const cur = out.get(r.account_id) ?? { cab: { closed: 0, pnl: 0 }, nihilist: { closed: 0, pnl: 0 }, open: 0 };
-      if (r.source === "cab" || r.source === "nihilist") cur[r.source as "cab" | "nihilist"] = { closed: r.closed, pnl: Number(r.pnl) };
+      const cur = out.get(r.account_id) ?? { cab: { closed: 0, pnl: 0 }, nihilist: { closed: 0, pnl: 0 }, btc: { closed: 0, pnl: 0 }, open: 0 };
+      if (r.source === "cab" || r.source === "nihilist" || r.source === "btc") cur[r.source as StatSrc] = { closed: r.closed, pnl: Number(r.pnl) };
       cur.open += r.open;
       out.set(r.account_id, cur);
     }
@@ -471,9 +473,9 @@ router.post("/me/telegram", async (req, res) => {
 router.get("/me/sources", async (req, res) => {
   res.setHeader("Cache-Control", "no-store");
   const row = await subscriberFor(req);
-  const [cab, nh] = await Promise.all([getSourceSettings("cab"), getSourceSettings("nihilist")]);
+  const [cab, nh, btc] = await Promise.all([getSourceSettings("cab"), getSourceSettings("nihilist"), getSourceSettings("btc")]);
   const m = nihilistStrategy(nh.strategy);
-  res.json({ chosen: String(row.trade_sources ?? "cab").split(",").filter(Boolean), available: { cab: cab.subscribers, nihilist: nh.subscribers },
+  res.json({ chosen: String(row.trade_sources ?? "cab").split(",").filter(Boolean), available: { cab: cab.subscribers, nihilist: nh.subscribers, btc: btc.subscribers },
     nihilistStrategy: { id: m.id, label: m.label },
     nihilistSettings: await getNihilistSettings(`sub-${row.id}`, nh.strategy),
     nihilistStrategies: nihilistStrategies().map(({ id, label }) => ({ id, label })) });
@@ -494,29 +496,32 @@ router.post("/me/sources", async (req, res) => {
   const row = await subscriberFor(req);
   if (row.status !== "approved") return refuse(res, 403, "not_approved", "Заявка ещё не одобрена");
   const list = Array.isArray(req.body?.sources) ? [...new Set(req.body.sources.map(String))] as string[] : null;
-  if (!list || !list.length || list.some((s) => s !== "cab" && s !== "nihilist")) return refuse(res, 422, "sources", "Выберите хотя бы один бот: CAB или Нигилист");
-  const [cab, nh] = await Promise.all([getSourceSettings("cab"), getSourceSettings("nihilist")]);
-  if ((list.includes("cab") && !cab.subscribers) || (list.includes("nihilist") && !nh.subscribers)) {
+  if (!list || !list.length || list.some((s) => s !== "cab" && s !== "nihilist" && s !== "btc")) return refuse(res, 422, "sources", "Выберите хотя бы один бот");
+  const [cab, nh, btc] = await Promise.all([getSourceSettings("cab"), getSourceSettings("nihilist"), getSourceSettings("btc")]);
+  if ((list.includes("cab") && !cab.subscribers) || (list.includes("nihilist") && !nh.subscribers) || (list.includes("btc") && !btc.subscribers)) {
     return refuse(res, 403, "source_closed", "Этот бот пока закрыт для подписчиков");
   }
-  const value = ["cab", "nihilist"].filter((s) => list.includes(s)).join(",");
+  const value = ["cab", "nihilist", "btc"].filter((s) => list.includes(s)).join(",");
   await pool.query("UPDATE subscribers SET trade_sources = $2, version = version + 1, updated_at = now() WHERE id = $1", [row.id, value]);
-  notifyOwner(row, [`Сигналы для торговли: ${value.split(",").map((s) => (s === "cab" ? "CAB" : "Нигилист")).join(" + ")}.`]);
+  notifyOwner(row, [`Сигналы для торговли: ${value.split(",").map((s) => (s === "cab" ? "CAB" : s === "btc" ? "Bitcoin MM" : "Нигилист")).join(" + ")}.`]);
   res.json({ chosen: value.split(",") });
 });
 
-// Bitcoin apart (owner 2026-11-03): per source on/off, leverage (50x default), own size.
-router.get("/me/btc-settings", async (req, res) => {
+// Bitcoin Margin Master (owner 2026-11-14): the person's own settings — size, leverage, margin reserve, template.
+router.get("/me/btcmm-settings", async (req, res) => {
   res.setHeader("Cache-Control", "no-store");
   const row = await subscriberFor(req);
-  res.json({ settings: await getBtcSettings(`sub-${row.id}`), maxLeverage: BTC_MAX_LEVERAGE });
+  res.json({ settings: await getBtcMm(`sub-${row.id}`), maxLeverage: BTC_MAX_LEVERAGE,
+    families: FAMILIES.map(({ id, label, signalLeverage, maxStopPct }) => ({ id, label, signalLeverage, maxStopPct })) });
 });
-router.post("/me/btc-settings", async (req, res) => {
+router.post("/me/btcmm-settings", async (req, res) => {
   const row = await subscriberFor(req);
   if (row.status !== "approved") return refuse(res, 403, "not_approved", "Заявка ещё не одобрена");
-  const out = await saveBtcSettings(`sub-${row.id}`, req.body);
-  if (!out.ok) return refuse(res, 422, out.code, "Проверьте значения: плечо от 1 до 125, процент от 0.1 до 100, сумма больше 0");
-  res.json({ settings: out.settings, maxLeverage: BTC_MAX_LEVERAGE });
+  const previous = await getBtcMm(`sub-${row.id}`);
+  const out = await saveBtcMm(`sub-${row.id}`, req.body);
+  if (!out.ok) return refuse(res, 422, out.code, "Проверьте значения: плечо 1–125, процент 0,1–100, сумма и запас больше 0");
+  if (JSON.stringify(previous) !== JSON.stringify(out.settings)) notifyOwner(row, [`Bitcoin Margin Master:\n${describeBtcMm(out.settings)}`]);
+  res.json({ settings: out.settings });
 });
 
 router.post("/me/position-settings", async (req, res) => {
@@ -690,10 +695,10 @@ router.get("/journal/subscribers", requireJournalSession, requireJournalOwner, a
   const list = (rows as Row[]).map((row) => {
     const s = ex.get(`sub-${row.id}-vst`);
     const stats = {
-      closed: s ? s.cab.closed + s.nihilist.closed : 0,
-      netUsdt: s ? Number((s.cab.pnl + s.nihilist.pnl).toFixed(4)) : 0,
+      closed: s ? s.cab.closed + s.nihilist.closed + s.btc.closed : 0,
+      netUsdt: s ? Number((s.cab.pnl + s.nihilist.pnl + s.btc.pnl).toFixed(4)) : 0,
       openPositions: s ? s.open : 0,
-      bySource: s ? { cab: s.cab, nihilist: s.nihilist } : { cab: { closed: 0, pnl: 0 }, nihilist: { closed: 0, pnl: 0 } },
+      bySource: s ? { cab: s.cab, nihilist: s.nihilist, btc: s.btc } : { cab: { closed: 0, pnl: 0 }, nihilist: { closed: 0, pnl: 0 }, btc: { closed: 0, pnl: 0 } },
     };
     return { ...publicView(row), stats };
   });
@@ -704,12 +709,12 @@ router.post("/journal/subscribers/:id/sources", requireJournalSession, requireJo
   const params = SetSubscriberSourcesParams.safeParse(req.params);
   if (!params.success) return refuse(res, 400, "invalid_subscriber_id", "Неверный идентификатор подписчика");
   const body = SetSubscriberSourcesBody.safeParse(req.body);
-  if (!body.success) return refuse(res, 400, "invalid_sources", "Выберите Crypto Alts Bullet, Nihilyst Crypto Trading или оба бота");
+  if (!body.success) return refuse(res, 400, "invalid_sources", "Выберите хотя бы один бот: Crypto Alts Bullet, Nihilyst Crypto Trading, Bitcoin Margin Master");
   if (new Set(body.data.sources).size !== body.data.sources.length) {
     return refuse(res, 400, "duplicate_sources", "Каждый бот можно выбрать только один раз");
   }
 
-  const sources = (["cab", "nihilist"] as const).filter((source) => body.data.sources.includes(source));
+  const sources = (["cab", "nihilist", "btc"] as const).filter((source) => body.data.sources.includes(source));
   const value = sources.join(",");
   const updated = await pool.query(
     `UPDATE subscribers SET trade_sources = $2, version = version + 1, updated_at = now()

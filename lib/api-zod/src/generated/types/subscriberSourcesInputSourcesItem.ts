@@ -12,4 +12,5 @@ export type SubscriberSourcesInputSourcesItem = typeof SubscriberSourcesInputSou
 export const SubscriberSourcesInputSourcesItem = {
   cab: 'cab',
   nihilist: 'nihilist',
+  btc: 'btc',
 } as const;

@@ -10,7 +10,7 @@ import { encryptSecret, forbiddenPermissions, plausibleBingXKey, readBingXKeyPer
 import { createBingX, type Env } from "./bingx";
 import { REASON_TEXT } from "./engine";
 import { ensureExecutorTables } from "./store";
-import { BOTS, ownerBotModes, ownerKeyFor, saveOwnerBotMode, type Bot, type OwnerAccountRow, type OwnerMode } from "./accounts";
+import { BOTS, isBot, ownerBotModes, ownerKeyFor, saveOwnerBotMode, type Bot, type OwnerAccountRow, type OwnerMode } from "./accounts";
 import { getOwnerBotControl, productionTrading, saveOwnerBotControl } from "./trading-controls";
 
 /** Owner 2026-11-06: each bot has its own account and its own on/off. */
@@ -96,7 +96,7 @@ export async function saveOwnerAccount(body: any, check: KeyCheck = checkKey): P
   const secret = typeof body?.apiSecret === "string" ? body.apiSecret.trim() : "";
   const source = body?.source;
   const mode = body?.mode;
-  if (source !== undefined && source !== "cab" && source !== "nihilist") return { ok: false, status: 400, message: "Неизвестный бот" };
+  if (source !== undefined && !isBot(source)) return { ok: false, status: 400, message: "Неизвестный бот" };
   if (mode !== undefined && mode !== "paper" && mode !== "vst" && mode !== "real") return { ok: false, status: 400, message: "Выберите PAPER, VST или REAL" };
   if ((mode === undefined) !== (source === undefined)) return { ok: false, status: 400, message: "Укажите бота и счёт" };
   if (!key && !secret && mode === undefined) return { ok: false, status: 400, message: "Нечего сохранять" };
@@ -148,7 +148,7 @@ export async function saveOwnerAccount(body: any, check: KeyCheck = checkKey): P
 
 /** Owner 2026-11-06: new trades of one bot on/off (its account only; the other bot is not touched). */
 export async function setOwnerBotTrading(source: unknown, enabled: unknown): Promise<SaveResult> {
-  if (source !== "cab" && source !== "nihilist") return { ok: false, status: 400, message: "Неизвестный бот" };
+  if (!isBot(source)) return { ok: false, status: 400, message: "Неизвестный бот" };
   if (typeof enabled !== "boolean") return { ok: false, status: 400, message: "Неверное значение" };
   if (!productionTrading()) return { ok: false, status: 409, message: "Торговлю нельзя переключать из dev. Откройте опубликованный сайт." };
   if (enabled) {
@@ -161,7 +161,7 @@ export async function setOwnerBotTrading(source: unknown, enabled: unknown): Pro
 }
 
 export type SignalRow = {
-  sourceSignalId: string; source: "cab" | "nihilist"; symbol: string; side: "long" | "short"; pattern: string | null;
+  sourceSignalId: string; source: "cab" | "nihilist" | "btc"; symbol: string; side: "long" | "short"; pattern: string | null;
   signalAt: string | null; receivedAt: string; entry: number | null; stop: number | null;
   trades: Array<{ id: number; accountId: string; status: string; reason: string | null; reasonText: string | null; pnl: number | null }>;
 };
@@ -183,7 +183,7 @@ export async function listSignals(days: number): Promise<SignalRow[]> {
     const sideRaw = String(b.side ?? "").toLowerCase();
     return {
       sourceSignalId: row.source_signal_id,
-      source: String(row.source_signal_id).startsWith("nh-") ? "nihilist" : "cab",
+      source: String(row.source_signal_id).startsWith("nh-") ? "nihilist" : String(row.source_signal_id).startsWith("btc-") ? "btc" : "cab",
       symbol: String(b.symbol ?? "").toUpperCase(),
       side: sideRaw === "sell" || sideRaw === "short" ? "short" : "long",
       pattern: typeof b.patternId === "string" ? b.patternId : typeof b.setup === "string" ? b.setup : null,

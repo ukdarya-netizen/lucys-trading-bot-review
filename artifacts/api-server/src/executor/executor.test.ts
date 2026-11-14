@@ -22,7 +22,7 @@ const sent: string[] = [];
 let strategy = resolveStrategy({ strategy: "take5" });
 const account = (): Account => ({
   id: "owner-vst", label: "BingX VST", env: "vst", key: "k", secret: "s",
-  allocation: { mode: "percent", value: 1 }, strategy, startedAt: 0, subscriberId: null, sources: new Set(["cab", "nihilist"]),
+  allocation: { mode: "percent", value: 1 }, strategy, startedAt: 0, subscriberId: null, sources: new Set(["cab", "nihilist", "btc"]),
 });
 let ex: ReturnType<typeof createExecutor>;
 
@@ -378,9 +378,10 @@ test("Nihilist sync: a missed trailing move is applied to a short, a missed clos
   await assert.rejects(readSourceSync("nihilist", 11, fetchImpl));
   assert.equal((await pool.query("SELECT status FROM ex_trades WHERE source_signal_id = 'nh-signal-12'")).rows[0].status, "open");
   answer = { positions: [{ sourceSignalId: "nh-signal-12", sourceAction: "review", sourceStatus: "cancelled", sourceStopLossPrice: 1.7 }], nextAfterId: null };
-  const sourceStatus: Record<"cab" | "nihilist", SourceSyncStatus> = {
+  const sourceStatus: Record<"cab" | "nihilist" | "btc", SourceSyncStatus> = {
     cab: { at: null, ok: null, error: null },
     nihilist: { at: null, ok: null, error: null },
+    btc: { at: null, ok: null, error: null },
   };
   await syncSource(ex, "nihilist", {
     read: async (source, after) => readSourceSync(source, after, fetchImpl),
@@ -450,33 +451,78 @@ test("Nihilist «Полный фикс на +15%»: take on the exchange, holdin
   await pool.query("DELETE FROM ex_source_settings");
 });
 
-test("Bitcoin: 50x by default for CAB and Nihilist, own size and leverage per source, can be switched off", async () => {
-  const { saveBtcSettings } = await import("./store");
+test("Bitcoin MM (owner 2026-11-14): signal leverage by default, template per family, its commands lead; BTC from CAB as any coin", async () => {
+  const { saveBtcMm, btcMmDefault } = await import("./btcmm");
+  const btcSig = (id: number, pattern: string, side: "long" | "short", entry: number, stop: number, leverage = 20) => {
+    const p = parseSignal({ sourceSignalId: `btc-signal-${id}`, symbol: "BTCUSDT", side, patternId: pattern, confirmationStatus: "confirmed",
+      signalAt: new Date().toISOString(), releasedAt: new Date().toISOString(), entryPrice: String(entry), stopLoss: String(stop), leverage,
+      exitRules: { maxHoldHours: 240 } }, "btc", Date.now());
+    assert.ok(p.ok, JSON.stringify(p));
+    return p.value;
+  };
+  const btcTrade = async (id: number) => (await pool.query("SELECT * FROM ex_trades WHERE source_signal_id = $1", [`btc-signal-${id}`])).rows[0];
+  const btcCmd = (id: number, seq: number, body: Record<string, unknown>) =>
+    (parseCommand({ commandId: `btc-${id}-${seq}`, sourceSignalId: `btc-signal-${id}`, symbol: "BTCUSDT", sequence: seq, occurredAt: new Date().toISOString(), ...body }, Date.now()) as any).value;
+
+  // Defaults: the signal's leverage (4h ×20), 1% of 10 000 = 100 margin → ≈2 000 position; no take of the bot.
   fake.setPrice("BTC-USDT", 60000);
-  await ex.onSignal(sig(61, "BTCUSDT", 58200, Date.now(), 60000));
-  const t = await trade(61);
+  await ex.onSignal(btcSig(1, "smc_4h_1h_long", "long", 60000, 58200));
+  let t = await btcTrade(1);
   assert.equal(t.status, "open", JSON.stringify(t));
-  assert.equal(t.leverage, 50);
-  const lev = fake.calls.filter((c) => c.method === "POST" && c.path.endsWith("/trade/leverage") && c.params.symbol === "BTC-USDT").map((c) => Number(c.params.leverage));
-  assert.ok(lev.length && lev.every((x) => x === 50), JSON.stringify(lev));
-  // 1% of 10,000 = 100 margin × 50 = about 5,000 of position.
-  assert.ok(Math.abs(Number(t.initial_qty) * Number(t.entry_price) - 5000) < 5000 * 0.05, String(Number(t.initial_qty) * Number(t.entry_price)));
-  assert.ok(Number(t.margin_added) > 0, "50x: liquidation at about −2% is before a 3% stop, so margin was added");
-  assert.ok(fake.liq("BTC-USDT", "LONG")! < 58200, "liquidation kept below the stop by a top-up");
-  await ex.onCommand((parseCommand({ commandId: "c61", sourceSignalId: "cab-signal-61", symbol: "BTCUSDT", type: "close", eventSeq: 1, eventAt: new Date().toISOString() }, Date.now()) as any).value);
+  assert.equal(t.leverage, 20); assert.equal(t.take_pct, null);
+  // BTC lot step in the fake: 0.01 → 2 000 / 60 000 = 0.033 → 0.03.
+  assert.equal(Number(t.initial_qty), 0.03);
+  assert.match(sent.find((x) => /Открыт лонг/.test(x) && /Bitcoin MM/.test(x))!, /Ведёт Bitcoin MM/);
+  // Target 1: half closed, stop to entry; then the rest.
+  fake.setPrice("BTC-USDT", 61500);
+  await ex.onCommand(btcCmd(1, 1, { type: "close", reason: "profit", partial: true, closeFractionOfInitial: 0.5 }));
+  await ex.onCommand(btcCmd(1, 2, { type: "move_stop", reason: "breakeven", stopPrice: String(t.entry_price) }));
+  t = await btcTrade(1);
+  assert.ok(Math.abs(Number(t.qty) - 0.02) < 1e-9, `${t.qty} of ${t.initial_qty}`); // half of 0.03 → 0.01 closed (lot 0.01)
+  assert.ok(Math.abs(Number(t.stop_price) - Number(t.entry_price)) < 1, String(t.stop_price));
+  await ex.onCommand(btcCmd(1, 3, { type: "close", reason: "profit" }));
+  assert.equal((await btcTrade(1)).status, "closed");
 
-  assert.ok((await saveBtcSettings("owner", { source: "nihilist", enabled: true, leverage: 20, allocationMode: "amount", allocationValue: 30 })).ok);
-  await ex.onSignal(nhSignal(62, "BTCUSDT", "short", 60000, 61800));
-  const n = await nhTrade(62);
-  assert.equal(n.status, "open"); assert.equal(n.leverage, 20);
-  assert.ok(Math.abs(Number(n.initial_qty) * Number(n.entry_price) - 600) < 600 * 0.11, String(Number(n.initial_qty) * Number(n.entry_price)));
-  await ex.onCommand(nhCmd(62, 1, "close", { reason: "expired", symbol: "BTCUSDT" }));
+  // Template: a family off; shorts only for Smart Money 4h; own leverage and size for the cascade.
+  const s = btcMmDefault();
+  s.families.range_1d.on = false;
+  s.families.smc_4h.sides = "short";
+  s.families.cascade = { on: true, sides: "both", leverage: 5, alloc: { mode: "amount", value: 600 } };
+  assert.ok((await saveBtcMm("owner", s)).ok);
+  fake.setPrice("BTC-USDT", 60000);
+  await ex.onSignal(btcSig(2, "d1_breakout_long", "long", 60000, 56000, 10));
+  assert.equal((await btcTrade(2)).reason, "btcmm_family_off");
+  await ex.onSignal(btcSig(3, "smc_4h_30m_long", "long", 60000, 58200));
+  assert.equal((await btcTrade(3)).reason, "side_disabled");
+  await ex.onSignal(btcSig(4, "lc_short", "short", 60000, 61800));
+  t = await btcTrade(4);
+  assert.equal(t.status, "open"); assert.equal(t.leverage, 5);
+  assert.equal(Number(t.initial_qty), 0.05); // 600 × 5 = 3 000 / 60 000
+  await ex.onCommand(btcCmd(4, 1, { type: "close", reason: "expired" }));
 
-  assert.ok((await saveBtcSettings("owner", { source: "cab", enabled: false, leverage: 50, allocationMode: "same" })).ok);
-  await ex.onSignal(sig(63, "BTCUSDT", 58200, Date.now(), 60000));
-  assert.equal((await trade(63)).reason, "btc_disabled");
-  assert.equal((await saveBtcSettings("owner", { source: "cab", enabled: true, leverage: 200 })).ok, false);
-  await pool.query("DELETE FROM ex_btc_settings");
+  // Margin reserve: 50x with a 3% stop needs a top-up; a reserve of 1 USDT is not enough → not opened, the message says how much.
+  assert.ok((await saveBtcMm("owner", { ...btcMmDefault(), leverage: 50, reserve: 1 })).ok);
+  await ex.onSignal(btcSig(5, "smc_1d_1h_long", "long", 60000, 58200, 10));
+  assert.equal((await btcTrade(5)).reason, "reserve_short");
+  assert.match(sent.at(-1)!, /нужно долить ≈\d/);
+  // Enough reserve: opened at 50x, liquidation kept beyond the stop.
+  assert.ok((await saveBtcMm("owner", { ...btcMmDefault(), leverage: 50, reserve: 1000 })).ok);
+  await ex.onSignal(btcSig(6, "smc_1d_1h_long", "long", 60000, 58200, 10));
+  t = await btcTrade(6);
+  assert.equal(t.status, "open"); assert.equal(t.leverage, 50);
+  assert.ok(fake.liq("BTC-USDT", "LONG")! < 58200);
+  await ex.onCommand(btcCmd(6, 1, { type: "close", reason: "stop_loss" }));
+
+  // BTC from CAB: as any CAB coin (10x), no Bitcoin MM settings.
+  await ex.onSignal(sig(61, "BTCUSDT", 58200, Date.now(), 60000));
+  assert.equal((await trade(61)).leverage, 10);
+  await pool.query("DELETE FROM ex_source_settings");
+});
+
+test("Bitcoin MM commands only with its token's ids", async () => {
+  assert.equal(parseSignal({ sourceSignalId: "btc-signal-1", symbol: "ETHUSDT", side: "long", signalAt: new Date().toISOString(), stopLoss: "1" }, "btc", Date.now()).ok, false);
+  assert.equal(parseSignal({ sourceSignalId: "cab-signal-1", symbol: "BTCUSDT", side: "long", signalAt: new Date().toISOString(), stopLoss: "1" }, "btc", Date.now()).ok, false);
+  assert.ok(parseCommand({ commandId: "btc-1-1", sourceSignalId: "btc-signal-1", type: "close" }, Date.now()).ok);
 });
 
 test("CAB size comes from its own source settings", async () => {
@@ -575,9 +621,10 @@ test("source-sync failures and unsettled trades never report a match; three fres
   const reconciliationHost = await reconciliationFake.start();
   t.after(async () => { await reconciliationFake.stop(); });
   let reconciliationNow = Date.now();
-  const sourceStatus: Record<"cab" | "nihilist", SourceSyncStatus> = {
+  const sourceStatus: Record<"cab" | "nihilist" | "btc", SourceSyncStatus> = {
     cab: { at: null, ok: null, error: null },
     nihilist: { at: null, ok: null, error: null },
+    btc: { at: null, ok: null, error: null },
   };
   const reconciler = createExecutor({
     loadAccounts: async () => [account()],
@@ -671,9 +718,10 @@ test("an empty VST account cannot announce a match while another owner account h
       (account_id, source, source_signal_id, symbol, side, pattern, env, status, signal_at, received_at, opened_at)
      VALUES ('owner-real', 'cab', 'cab-signal-20901', 'ANIMEUSDT', 'long', 'impulse_buy', 'real', 'open', now(), now(), now())`,
   );
-  const sourceStatus: Record<"cab" | "nihilist", SourceSyncStatus> = {
+  const sourceStatus: Record<"cab" | "nihilist" | "btc", SourceSyncStatus> = {
     cab: { at: Date.now(), ok: false, error: "cancellation/reclassification requires review" },
     nihilist: { at: Date.now(), ok: true, error: null },
+    btc: { at: Date.now(), ok: true, error: null },
   };
   const notices: string[] = [];
   const reconciler = createExecutor({

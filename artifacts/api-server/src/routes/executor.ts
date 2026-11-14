@@ -1,7 +1,8 @@
 import { Router, type IRouter } from "express";
 import { requireJournalOwner, requireJournalSession } from "../middlewares/journalAccess";
 import { cabOrigin, executorHealth, executorStatus, executorTradeEvents, saveNihilistSettings, saveSourceSettingsFrom } from "../executor";
-import { saveBtcSettings } from "../executor/store";
+import { btcMmReport, describeBtcMm, getBtcMm, saveBtcMm } from "../executor/btcmm";
+import { isBot } from "../executor/accounts";
 import { listSignals, ownerAccountInfo, saveOwnerAccount, setOwnerBotTrading } from "../executor/owner-account";
 import {
   GetExecutorTradingControlsResponse,
@@ -127,7 +128,7 @@ router.post("/journal/executor/nihilist-settings", requireJournalSession, requir
 router.post("/journal/executor/source-settings/:source", requireJournalSession, requireJournalOwner, async (req, res) => {
   res.setHeader("Cache-Control", "no-store");
   const source = req.params.source;
-  if (source !== "cab" && source !== "nihilist") { res.status(404).json({ error: { code: "unknown_source", message: "Нет такого источника" } }); return; }
+  if (!isBot(source)) { res.status(404).json({ error: { code: "unknown_source", message: "Нет такого источника" } }); return; }
   const out = await saveSourceSettingsFrom(source, req.body);
   if (!out.ok) { res.status(400).json({ error: { code: out.code, message: "Неверные настройки" } }); return; }
   res.json(out.settings);
@@ -155,11 +156,22 @@ router.get("/journal/executor/signals", requireJournalSession, requireJournalOwn
   res.setHeader("Cache-Control", "no-store");
   res.json({ signals: await listSignals(Number(req.query.days ?? 3)) });
 });
-router.post("/journal/executor/btc-settings", requireJournalSession, requireJournalOwner, async (req, res) => {
+// Bitcoin MM (owner 2026-11-14): the owner's settings — size, leverage, margin reserve, template per pattern family.
+router.post("/journal/executor/btcmm-settings", requireJournalSession, requireJournalOwner, async (req, res) => {
   res.setHeader("Cache-Control", "no-store");
-  const out = await saveBtcSettings("owner", req.body);
-  if (!out.ok) { res.status(400).json({ error: { code: out.code, message: "Неверные настройки биткоина" } }); return; }
+  const previous = await getBtcMm("owner");
+  const out = await saveBtcMm("owner", req.body);
+  if (!out.ok) { res.status(400).json({ error: { code: out.code, message: "Проверьте значения: плечо 1–125, процент 0,1–100, сумма и запас больше 0" } }); return; }
+  if (JSON.stringify(previous) !== JSON.stringify(out.settings)) {
+    await telegramSender(`Кабинет владельца · Bitcoin Margin Master\n${describeBtcMm(out.settings)}`).catch(() => req.log.warn("Bitcoin MM cabinet notice failed"));
+  }
   res.json({ settings: out.settings });
+});
+// Bitcoin MM's virtual panel (owner 2026-11-14): the ladders on its signals, read from Bitcoin MM with its token.
+router.get("/journal/executor/btcmm-report", requireJournalSession, requireJournalOwner, async (_req, res) => {
+  res.setHeader("Cache-Control", "no-store");
+  const out = await btcMmReport();
+  res.status(out.status).json(out.body);
 });
 // Nihilist's strategy report, read from Nihilist with the trading token (owner 2026-11-03).
 function nihilistBase(): string | null {

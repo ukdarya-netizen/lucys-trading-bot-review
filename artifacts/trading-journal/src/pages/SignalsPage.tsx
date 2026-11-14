@@ -9,7 +9,7 @@ import { SourceSwitch, useSourceFilter, px, sideCls, sideText } from "@/componen
 import { formatUsdt, toneClass } from "@/lib/performance";
 
 type SignalRow = {
-  sourceSignalId: string; source: "cab" | "nihilist"; symbol: string; side: "long" | "short"; pattern: string | null;
+  sourceSignalId: string; source: "cab" | "nihilist" | "btc"; symbol: string; side: "long" | "short"; pattern: string | null;
   signalAt: string | null; receivedAt: string; entry: number | null; stop: number | null;
   trades: Array<{ id: number; accountId: string; status: string; reason: string | null; reasonText: string | null; pnl: number | null }>;
 };
@@ -51,7 +51,7 @@ export default function SignalsPage() {
                 {rows.map((s) => (
                   <tr key={s.sourceSignalId} className="border-t border-border align-top">
                     <td className="px-3 py-2 tabular text-muted-foreground">{when(s.receivedAt)}</td>
-                    <td className="px-3 py-2"><BotBrand source={s.source === "cab" ? "cab" : "nihilist"} size="xs" />{s.pattern ? <span className="block text-xs text-muted-foreground">{s.pattern}</span> : null}</td>
+                    <td className="px-3 py-2"><BotBrand source={s.source} size="xs" />{s.pattern ? <span className="block text-xs text-muted-foreground">{s.pattern}</span> : null}</td>
                     <td className="px-3 py-2 font-bold">{s.symbol.replace(/USDT$/, "")}</td>
                     <td className={`px-3 py-2 ${sideCls(s.side)}`}>{sideText(s.side)}</td>
                     <td className="px-3 py-2 tabular">{px(s.entry)}</td>

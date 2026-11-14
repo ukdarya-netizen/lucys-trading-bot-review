@@ -1,7 +1,7 @@
 /**
  * Executor start (owner 2026-11-02 rewrite). On with EXECUTOR_V2=1; the old
  * VST/PAPER workers are then not started. Reconciles every 20 s, polls the
- * position sync of each source (CAB and Nihilist) every 60 s while it has an
+ * position sync of each source (CAB, Nihilist, Bitcoin MM) every 60 s while it has an
  * open trade there, reloads accounts every minute.
  */
 import type { IncomingMessage, ServerResponse } from "node:http";
@@ -16,7 +16,8 @@ let paperFetch: ReturnType<typeof createPaperFetch> | null = null;
 import { REASON_TEXT, createExecutor, type Executor } from "./engine";
 import { closeReasonText, isCancelReason } from "./texts";
 import { createIntakeHandler } from "./intake";
-import { BTC_MAX_LEVERAGE, ensureExecutorTables, getBtcSettings, getSourceSettings, saveSourceSettings, type SourceSettings } from "./store";
+import { ensureExecutorTables, getSourceSettings, saveSourceSettings, type SourceSettings } from "./store";
+import { BTC_MAX_LEVERAGE, FAMILIES, getBtcMm } from "./btcmm";
 import { nihilistStrategies, nihilistStrategy } from "./plan";
 import { getNihilistSettings } from "./nihilist-settings";
 import { missingSourceSignals, sourceActionKind, type SourceSyncStatus } from "./source-state";
@@ -38,7 +39,8 @@ export function executorRequestHandler(req: IncomingMessage, res: ServerResponse
 }
 
 export type SourceState = { sourceSignalId: string; action: string; stop: number | null; status?: string | null; cancelReason?: string | null };
-export type SyncSource = "cab" | "nihilist";
+export type SyncSource = "cab" | "nihilist" | "btc";
+export const SYNC_SOURCES: SyncSource[] = ["cab", "nihilist", "btc"];
 
 /** Where each source's position sync lives and its token. Nihilist's address: NIHILIST_POSITION_SYNC_URL. */
 /** CAB's address (from its position sync URL), for its strategy report. */
@@ -48,8 +50,10 @@ export function cabOrigin(): string {
 }
 
 function syncTarget(source: SyncSource): { url: string; token: string } | null {
-  const token = (source === "cab" ? process.env.TRADING_INGEST_TOKEN : process.env.NIHILIST_TRADING_TOKEN)?.trim();
-  const url = source === "cab" ? process.env.CAB_POSITION_SYNC_URL?.trim() || CAB_SYNC_URL : process.env.NIHILIST_POSITION_SYNC_URL?.trim();
+  const token = (source === "cab" ? process.env.TRADING_INGEST_TOKEN : source === "btc" ? process.env.BTC_TRADING_TOKEN : process.env.NIHILIST_TRADING_TOKEN)?.trim();
+  // Bitcoin MM (owner 2026-11-14): BTC_POSITION_SYNC_URL — https://<its site>/api/trading/position-sync.
+  const url = source === "cab" ? process.env.CAB_POSITION_SYNC_URL?.trim() || CAB_SYNC_URL
+    : source === "btc" ? process.env.BTC_POSITION_SYNC_URL?.trim() : process.env.NIHILIST_POSITION_SYNC_URL?.trim();
   return token && url ? { url, token } : null;
 }
 
@@ -191,11 +195,11 @@ export async function startExecutor(log: (msg: string, extra?: unknown) => void)
   void reconcile();
   setInterval(() => void reconcile(), 20_000).unref?.();
   const lastSync: Record<SyncSource, { at: number | null; ok: boolean | null; error: string | null }> = {
-    cab: { at: null, ok: null, error: null }, nihilist: { at: null, ok: null, error: null },
+    cab: { at: null, ok: null, error: null }, nihilist: { at: null, ok: null, error: null }, btc: { at: null, ok: null, error: null },
   };
   syncState = lastSync;
   setInterval(() => {
-    for (const source of ["cab", "nihilist"] as const) {
+    for (const source of SYNC_SOURCES) {
       void syncSource(ex, source)
         .catch((e) => {
           log(`executor: ${source} sync failed`, e);
@@ -204,7 +208,7 @@ export async function startExecutor(log: (msg: string, extra?: unknown) => void)
   }, 60_000).unref?.();
 }
 
-const SOURCE_NAME: Record<string, string> = { cab: "CAB", nihilist: "Нигилист" };
+const SOURCE_NAME: Record<string, string> = { cab: "CAB", nihilist: "Нигилист", btc: "Bitcoin MM" };
 /** Owner 2026-11-09: closes caused by a source's cancellation (see texts.ts isCancelReason) — not a win or a loss. */
 const CANCEL_SQL = `coalesce(close_reason LIKE 'cancel:%' OR close_reason LIKE 'cancel\\_sync:%'
   OR (close_reason LIKE 'source:%' AND substr(close_reason, 8) NOT IN ('stop_loss','expired','breakeven_stop','breakeven_close','trailing_stop','profit','core_exit','close','')
@@ -298,7 +302,9 @@ export async function executorStatus(): Promise<unknown> {
     cab: { settings: await getSourceSettings("cab") },
     nihilist: { settings: await getSourceSettings("nihilist"), sideSettings: await getNihilistSettings("owner"),
       strategies: nihilistStrategies().map(({ id, label }) => ({ id, label })) },
-    btc: { settings: await getBtcSettings("owner"), maxLeverage: BTC_MAX_LEVERAGE },
+    // Bitcoin MM (owner 2026-11-14): on/off for subscribers in `settings`; the owner's trading settings in `mm`.
+    btc: { settings: await getSourceSettings("btc"), mm: await getBtcMm("owner"), maxLeverage: BTC_MAX_LEVERAGE,
+      families: FAMILIES.map(({ id, label, signalLeverage, maxStopPct }) => ({ id, label, signalLeverage, maxStopPct })) },
     accounts: executor ? [...executor.runtimes.values()].map((r) => ({
       id: r.acct.id, label: r.acct.label, env: r.acct.env, strategy: r.acct.strategy.name, takePct: r.acct.strategy.takePct,
       paper: Boolean(r.acct.paper), sources: [...r.acct.sources],
@@ -328,7 +334,7 @@ export async function executorTradeEvents(id: number): Promise<unknown> {
 }
 
 /** Owner saves one source's trading settings (CAB or Nihilist); returns the error code when the input is wrong. */
-export async function saveSourceSettingsFrom(source: "cab" | "nihilist", b: any): Promise<{ ok: true; settings: SourceSettings } | { ok: false; code: string }> {
+export async function saveSourceSettingsFrom(source: SyncSource, b: any): Promise<{ ok: true; settings: SourceSettings } | { ok: false; code: string }> {
   if (!b || typeof b !== "object") return { ok: false, code: "invalid_payload" };
   const cur = await getSourceSettings(source);
   const next: SourceSettings = { ...cur };
@@ -351,13 +357,13 @@ export async function saveSourceSettingsFrom(source: "cab" | "nihilist", b: any)
 export const saveNihilistSettings = (b: any) => saveSourceSettingsFrom("nihilist", b);
 
 /** Last signal received from each source and how many in 24 hours (ex_inbox). */
-async function inboxBySource(): Promise<Record<"cab" | "nihilist", { lastAt: string | null; last24h: number }>> {
-  const out = { cab: { lastAt: null as string | null, last24h: 0 }, nihilist: { lastAt: null as string | null, last24h: 0 } };
+async function inboxBySource(): Promise<Record<SyncSource, { lastAt: string | null; last24h: number }>> {
+  const out = { cab: { lastAt: null as string | null, last24h: 0 }, nihilist: { lastAt: null as string | null, last24h: 0 }, btc: { lastAt: null as string | null, last24h: 0 } };
   const r = await pool.query(
-    `SELECT CASE WHEN source_signal_id LIKE 'nh-%' THEN 'nihilist' ELSE 'cab' END AS src,
+    `SELECT CASE WHEN source_signal_id LIKE 'nh-%' THEN 'nihilist' WHEN source_signal_id LIKE 'btc-%' THEN 'btc' ELSE 'cab' END AS src,
             max(received_at) AS last_at, count(*) FILTER (WHERE received_at > now() - interval '24 hours')::int AS n
      FROM ex_inbox WHERE kind = 'signal' GROUP BY 1`);
-  for (const row of r.rows as any[]) out[row.src as "cab" | "nihilist"] = { lastAt: row.last_at ? new Date(row.last_at).toISOString() : null, last24h: row.n };
+  for (const row of r.rows as any[]) out[row.src as SyncSource] = { lastAt: row.last_at ? new Date(row.last_at).toISOString() : null, last24h: row.n };
   return out;
 }
 
@@ -413,7 +419,7 @@ export async function executorHealth(): Promise<unknown> {
   // Sources: signals (last 24 h) and the position sync (only matters while a trade of the source is open).
   const inbox = await inboxBySource();
   const openBySource = new Map(openN.rows.map((r) => [r.source as string, r.n as number]));
-  const sources = (["cab", "nihilist"] as const).map((s) => {
+  const sources = SYNC_SOURCES.map((s) => {
     const sync = syncState[s] ?? { at: null, ok: null, error: null };
     const open = openBySource.get(s) ?? 0;
     if (open && sync.ok === false) problems.push({ level: "yellow", text: `Синхронизация позиций ${SOURCE_NAME[s]}: ${sync.error}` });

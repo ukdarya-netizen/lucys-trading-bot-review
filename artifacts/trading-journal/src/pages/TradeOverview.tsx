@@ -60,7 +60,7 @@ export default function TradeOverview() {
   const liq = totals.reduce((s, t) => s + t.liquidations, 0);
   const a = ownerAccountOf(d);
   const asset = a?.env === "real" ? "USDT" : "VST";
-  const name = filter === "all" ? "оба бота" : BOT_BRAND_NAMES[filter];
+  const name = filter === "all" ? "все боты" : BOT_BRAND_NAMES[filter];
 
   return (
     <div className="mx-auto max-w-7xl space-y-5">

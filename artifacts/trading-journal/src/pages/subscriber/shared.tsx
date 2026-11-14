@@ -3,7 +3,7 @@
  * Mini App — overview, own positions, own history, cabinet. Own account only (/api/me/*).
  */
 import { useQuery } from "@tanstack/react-query";
-import { BotBrand, BOT_BRAND_NAMES, type BotSource } from "@/components/BotBrand";
+import { BotBrand, BOT_BRAND_NAMES, BOT_SOURCES, type BotSource } from "@/components/BotBrand";
 import { api, type Subscription } from "@/lib/subscriber-api";
 import { formatPercent, formatUsdt, patternName, toneClass } from "@/lib/performance";
 
@@ -35,12 +35,12 @@ export function useSubscription() {
 export type BotFilter = "all" | BotSource;
 export function BotFilterTabs({ value, onChange }: { value: BotFilter; onChange: (v: BotFilter) => void }) {
   return (
-    <div className="inline-grid grid-cols-3 border border-border">
-      {(["all", "cab", "nihilist"] as const).map((id) => (
+    <div className="inline-grid grid-cols-4 border border-border">
+      {(["all", ...BOT_SOURCES] as const).map((id) => (
         <button key={id} type="button" aria-pressed={value === id} onClick={() => onChange(id)}
-          aria-label={id === "all" ? "Оба бота" : BOT_BRAND_NAMES[id]}
+          aria-label={id === "all" ? "Все боты" : BOT_BRAND_NAMES[id]}
           className={`min-h-10 min-w-0 px-2 text-xs font-bold sm:px-3 ${value === id ? "bg-primary text-primary-foreground" : "text-muted-foreground"}`}>
-          {id === "all" ? "Оба" : <BotBrand source={id} size="xs" />}
+          {id === "all" ? "Все" : <BotBrand source={id} size="xs" />}
         </button>
       ))}
     </div>
@@ -63,7 +63,7 @@ export function duration(from: string | null, to: string | null) {
   return d >= 1 ? `${d} д ${h % 24} ч` : h >= 1 ? `${h} ч ${Math.floor((ms % 3_600_000) / 60_000)} мин` : `${Math.max(1, Math.floor(ms / 60_000))} мин`;
 }
 export function TradeTitle({ t }: { t: SubTrade }) {
-  const src = (t.source === "nihilist" ? "nihilist" : "cab") as BotSource;
+  const src = (t.source === "nihilist" || t.source === "btc" ? t.source : "cab") as BotSource;
   return (
     <div className="min-w-0">
       <p className="flex items-center gap-2 font-bold">

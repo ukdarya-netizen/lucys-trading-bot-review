@@ -1,13 +1,13 @@
-// Shared pieces of the trading pages (owner 2026-11-03: two signal sources, CAB and Nihilist).
+// Shared pieces of the trading pages (owner 2026-11-03: signal sources CAB and Nihilist; 2026-11-14: Bitcoin MM).
 import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { ChevronDown, ChevronRight } from "lucide-react";
 import { formatUsdt, toneClass } from "@/lib/performance";
 import { api } from "@/lib/subscriber-api";
-import type { BtcSettings } from "@/components/BtcCard";
+import type { BtcMm, BtcMmFamily } from "@/components/BtcMm";
 import { InboxLine, type InboxInfo, type SourceSettingsValue } from "@/components/SourceSettings";
 import { Link } from "wouter";
-import { BotBrand, BOT_BRAND_NAMES } from "@/components/BotBrand";
+import { BotBrand, BOT_BRAND_NAMES, BOT_SOURCES } from "@/components/BotBrand";
 import type { ExecutorTradingControlState } from "@workspace/api-client-react";
 import type { NihilistSettings } from "@/components/NihilistSideSettings";
 
@@ -24,11 +24,11 @@ export type NhSettings = { source: string; enabled: boolean; allocationMode: "pe
 export type Status = {
   enabled: boolean; asOf: string;
   tradingControls?: ExecutorTradingControlState[];
-  inbox: Record<"cab" | "nihilist", InboxInfo>;
+  inbox: Record<"cab" | "nihilist" | "btc", InboxInfo>;
   telegram: { pending: number; oldestPendingAt: string | null; failed24h: number; lastError: string | null; lastErrorAt: string | null; lastSentAt: string | null } | null;
   cab: { settings: SourceSettingsValue };
   nihilist: { settings: NhSettings; sideSettings: NihilistSettings; strategies: Array<{ id: string; label: string }> };
-  btc: { settings: BtcSettings[]; maxLeverage: number };
+  btc: { settings: NhSettings; mm: BtcMm; maxLeverage: number; families: BtcMmFamily[] };
   accounts: Array<{ id: string; label: string; env: string; strategy: string; takePct: number | null; balance: { equity: number; available: number } | null }>;
   ownerAccount?: {
     id: string; label: string; env: string; tradingEnabled: boolean;
@@ -91,22 +91,22 @@ export function useExecutor() {
   return useQuery({ queryKey: ["executor-status"], queryFn: () => api<Status>("/journal/executor"), refetchInterval: 15_000 });
 }
 
-export type SourceFilter = "all" | "cab" | "nihilist";
+export type SourceFilter = "all" | "cab" | "nihilist" | "btc";
 const SF_KEY = "trading-source-filter";
 /** One source filter shared by Обзор, Позиции and История (remembered in this browser). */
 export function useSourceFilter(): [SourceFilter, (v: SourceFilter) => void] {
   const [v, setV] = useState<SourceFilter>(() => {
-    try { const x = localStorage.getItem(SF_KEY); return x === "cab" || x === "nihilist" ? x : "all"; } catch { return "all"; }
+    try { const x = localStorage.getItem(SF_KEY); return x === "cab" || x === "nihilist" || x === "btc" ? x : "all"; } catch { return "all"; }
   });
   return [v, (x) => { setV(x); try { localStorage.setItem(SF_KEY, x); } catch { /* private mode */ } }];
 }
 export function SourceSwitch({ value, onChange }: { value: SourceFilter; onChange: (v: SourceFilter) => void }) {
   return (
-    <div role="tablist" aria-label="Источник сигналов" className="inline-grid grid-cols-3 border border-border bg-card">
-      {(["all", "cab", "nihilist"] as const).map((id) => (
-        <button key={id} role="tab" type="button" aria-label={id === "all" ? "Оба бота" : BOT_BRAND_NAMES[id]} aria-selected={value === id} onClick={() => onChange(id)}
+    <div role="tablist" aria-label="Источник сигналов" className="inline-grid grid-cols-4 border border-border bg-card">
+      {(["all", ...BOT_SOURCES] as const).map((id) => (
+        <button key={id} role="tab" type="button" aria-label={id === "all" ? "Все боты" : BOT_BRAND_NAMES[id]} aria-selected={value === id} onClick={() => onChange(id)}
           className={`flex min-h-12 min-w-0 items-center justify-center px-1.5 text-xs font-bold sm:px-3 ${value === id ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:bg-muted"}`}>
-          {id === "all" ? "Оба бота" : <BotBrand source={id} size="xs" />}
+          {id === "all" ? "Все боты" : <BotBrand source={id} size="xs" />}
         </button>
       ))}
     </div>
@@ -140,8 +140,8 @@ export function SourcesStatus({ d }: { d: Status }) {
   return (
     <>
     <TelegramWarning d={d} />
-    <div className="grid gap-3 sm:grid-cols-2">
-      {(["cab", "nihilist"] as const).map((src) => {
+    <div className="grid gap-3 sm:grid-cols-3">
+      {BOT_SOURCES.map((src) => {
         const name = BOT_BRAND_NAMES[src];
         const on = d[src].settings.enabled;
         return (

@@ -10,7 +10,7 @@ import type { SubscriberSourcesInputSourcesItem } from './subscriberSourcesInput
 export interface SubscriberSourcesInput {
   /**
      * @minItems 1
-     * @maxItems 2
+     * @maxItems 3
      */
   sources: SubscriberSourcesInputSourcesItem[];
 }

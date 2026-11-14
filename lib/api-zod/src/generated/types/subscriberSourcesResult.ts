@@ -11,7 +11,7 @@ export interface SubscriberSourcesResult {
   id: number;
   /**
      * @minItems 1
-     * @maxItems 2
+     * @maxItems 3
      */
   tradeSources: SubscriberSourcesResultTradeSourcesItem[];
 }

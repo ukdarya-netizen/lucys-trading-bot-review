@@ -1,7 +1,8 @@
 // «CAB и Нигилист» (owner 2026-11-04): results only — one tab per signal bot, every way of leading its
 // trades with what it would have given to the deposit at the owner's size (CAB on its real closed
 // signals, computed in CAB; Nihilist on its backtest and real signals). Nothing is chosen here: the
-// strategy, on/off, size and Bitcoin of the owner's account are all in «Мой кабинет».
+// strategy, on/off, size and Bitcoin of the owner's account are all in «Мой кабинет». Owner 2026-11-14: Bitcoin Margin
+// Master — its virtual ladders by pattern family and side (decide in January).
 import { useState } from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { Link } from "wouter";
@@ -11,20 +12,21 @@ import { StrategyCard, StrategySection, NIHILIST_DESCRIPTIONS } from "@/componen
 import { LoadingOrError, ownerAccountOf, useExecutor, type Status } from "@/components/executor-ui";
 import { num } from "@/components/form-bits";
 import { api, ApiFailure } from "@/lib/subscriber-api";
-import { BotBrand, BOT_BRAND_NAMES, type BotSource } from "@/components/BotBrand";
+import { BotBrand, BOT_BRAND_NAMES, BOT_SOURCES, type BotSource } from "@/components/BotBrand";
+import { BtcMmReport } from "@/components/BtcMm";
 
 type Source = BotSource;
 const LEVERAGE = 10;
 
 export default function StrategiesPage() {
   const ex = useExecutor();
-  const [tab, setTab] = useState<Source>(() => { try { return localStorage.getItem("strategies-tab") === "nihilist" ? "nihilist" : "cab"; } catch { return "cab"; } });
+  const [tab, setTab] = useState<Source>(() => { try { const v = localStorage.getItem("strategies-tab"); return v === "nihilist" || v === "btc" ? v : "cab"; } catch { return "cab"; } });
   const choose = (t: Source) => { setTab(t); try { localStorage.setItem("strategies-tab", t); } catch { /* private mode */ } };
   const d = ex.data;
   return (
     <div className="mx-auto max-w-6xl space-y-4">
       <div role="tablist" className="flex gap-1 border-b border-border">
-        {(["cab", "nihilist"] as const).map((id) => (
+        {BOT_SOURCES.map((id) => (
           <button key={id} role="tab" type="button" aria-label={BOT_BRAND_NAMES[id]} aria-selected={tab === id} onClick={() => choose(id)}
             className={`-mb-px flex min-h-14 min-w-0 flex-1 items-center justify-center border border-b-0 px-2 sm:px-5 ${tab === id ? "border-border bg-card" : "border-transparent text-muted-foreground hover:text-foreground"}`}>
             <BotBrand source={id} size="sm" />
@@ -35,10 +37,10 @@ export default function StrategiesPage() {
         <>
           {!d.enabled && <p className="border border-destructive/50 bg-destructive/10 p-3 text-sm text-destructive">Торговый бот выключен: в Secrets нет EXECUTOR_V2=1.</p>}
           <p className="text-sm text-muted-foreground">
-            Здесь только результаты стратегий. Выбрать стратегию, включить торговлю, размер и BTC —{" "}
+            Здесь только результаты стратегий. Выбрать стратегию, включить торговлю, размер и плечо —{" "}
             <Link href="/journal/my-bot" className="text-primary underline">в «Мой кабинет»</Link>.
           </p>
-          {tab === "cab" ? <CabStrategies d={d} /> : <NihilistStrategies d={d} />}
+          {tab === "cab" ? <CabStrategies d={d} /> : tab === "nihilist" ? <NihilistStrategies d={d} /> : <BtcMmReport families={d.btc.families} />}
         </>
       )}
     </div>

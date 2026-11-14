@@ -19,21 +19,21 @@ export const SetSubscriberSourcesParams = zod.object({
   "id": zod.coerce.number().int().min(1)
 })
 
-export const setSubscriberSourcesBodySourcesMax = 2;
+export const setSubscriberSourcesBodySourcesMax = 3;
 
 
 
 export const SetSubscriberSourcesBody = zod.object({
-  "sources": zod.array(zod.enum(['cab', 'nihilist'])).min(1).max(setSubscriberSourcesBodySourcesMax)
+  "sources": zod.array(zod.enum(['cab', 'nihilist', 'btc'])).min(1).max(setSubscriberSourcesBodySourcesMax)
 })
 
-export const setSubscriberSourcesResponseTradeSourcesMax = 2;
+export const setSubscriberSourcesResponseTradeSourcesMax = 3;
 
 
 
 export const SetSubscriberSourcesResponse = zod.object({
   "id": zod.int(),
-  "tradeSources": zod.array(zod.enum(['cab', 'nihilist'])).min(1).max(setSubscriberSourcesResponseTradeSourcesMax)
+  "tradeSources": zod.array(zod.enum(['cab', 'nihilist', 'btc'])).min(1).max(setSubscriberSourcesResponseTradeSourcesMax)
 })
 
 

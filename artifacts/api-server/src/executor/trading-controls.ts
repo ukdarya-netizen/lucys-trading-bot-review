@@ -1,5 +1,5 @@
 import { pool } from "@workspace/db";
-import type { Account, Bot } from "./accounts";
+import { isBot, type Account, type Bot } from "./accounts";
 
 export const CONTROL_TARGETS = ["owner", "subscribers"] as const;
 export type ControlTarget = typeof CONTROL_TARGETS[number];
@@ -65,7 +65,7 @@ export async function accountEntryAllowed(account: Account, releasedAt: number, 
   if (!productionTrading()) return false;
   if (!account.sources.has(source)) return false;
   if (account.subscriberId === null) {
-    if (source !== "cab" && source !== "nihilist") return false;
+    if (!isBot(source)) return false;
     const control = await getOwnerBotControl(source);
     return control.enabled && releasedAt >= control.startedAt;
   }
