@@ -45,6 +45,8 @@ export async function getOwnerBotControl(bot: Bot): Promise<{ enabled: boolean; 
     "SELECT source, enabled, updated_at FROM ex_source_settings WHERE source = ANY($1::text[]) AND source NOT LIKE 'nihilist_sides:%'", [[botControlKey(bot), bot]]);
   const own = r.rows.find((x) => x.source === botControlKey(bot));
   if (own) return { enabled: own.enabled, startedAt: own.enabled ? new Date(own.updated_at).getTime() : 0, saved: true };
+  // Owner 2026-11-14: Bitcoin MM is new — off until the owner switches it on in its tab (never starts trading by itself).
+  if (bot === "btc") return { enabled: false, startedAt: 0, saved: false };
   const global = await getTradingControl("owner");
   const legacyBot = r.rows.find((x) => x.source === bot)?.enabled ?? true;
   return { enabled: global.enabled && legacyBot, startedAt: global.startedAt, saved: false };

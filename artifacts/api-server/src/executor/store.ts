@@ -251,8 +251,9 @@ export type SourceSettings = {
 };
 // CAB is what subscribers pay for: open to them by default; Nihilist is not (owner 2026-11-03).
 // Owner 2026-11-03: both bots are open to subscribers by default; each person chooses in the cabinet.
+// Owner 2026-11-14: Bitcoin MM is closed to subscribers until the owner opens it on «Подписчики».
 const DEFAULT_SETTINGS = (source: string): SourceSettings =>
-  ({ source, enabled: true, allocationMode: "percent", allocationValue: 1, strategy: "source", subscribers: true });
+  ({ source, enabled: true, allocationMode: "percent", allocationValue: 1, strategy: "source", subscribers: source !== "btc" });
 
 export async function getSourceSettings(source: string): Promise<SourceSettings> {
   await ensureExecutorTables();

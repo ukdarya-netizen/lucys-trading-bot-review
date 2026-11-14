@@ -74,7 +74,8 @@ const isMode = (v: unknown): v is OwnerMode => v === "paper" || v === "vst" || v
 
 export async function ownerBotModes(row: OwnerAccountRow | null): Promise<Record<Bot, OwnerMode>> {
   const fallback: OwnerMode = isMode(row?.mode) ? row!.mode : "vst";
-  const out: Record<Bot, OwnerMode> = { cab: fallback, nihilist: fallback, btc: fallback };
+  // Bitcoin MM (owner 2026-11-14) starts on VST (demo) until the owner picks its account.
+  const out: Record<Bot, OwnerMode> = { cab: fallback, nihilist: fallback, btc: "vst" };
   try {
     const r = await pool.query<{ source: string; strategy: string }>(
       "SELECT source, strategy FROM ex_source_settings WHERE source = ANY($1::text[]) AND source NOT LIKE 'nihilist_sides:%'", [BOTS.map(botAccountKey)]);
