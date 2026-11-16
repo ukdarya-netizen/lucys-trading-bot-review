@@ -297,6 +297,11 @@ function SizeStep({ sub, choices, onChanged }: { sub: Subscription; choices: Pos
           <p className={`text-xs ${valid ? "text-muted-foreground" : "text-destructive"}`}>{example}</p>
         </div>
         <p className="text-xs text-muted-foreground">Плечо 10x и изолированная маржа — всегда. Если ликвидация оказывается раньше стопа, бот доливает маржу. У BTC своё плечо и размер — в шаге «Как вести сделки».</p>
+        {/* Owner 2026-11-16: as the executor counts it (marginFor: equity × %; no_funds when the margin is above the free margin). */}
+        <p className="border border-amber-400/50 bg-amber-400/10 p-3 text-xs">
+          Процент считается от всего баланса счёта BingX, к которому подключён ключ API, — вместе с маржой в открытых позициях и плавающей прибылью или убытком.
+          Если свободной маржи на счёте меньше, чем нужно на сделку, бот сделку не открывает.
+        </p>
         <div className="flex flex-wrap items-center gap-3">
           <button type="button" onClick={() => { setMessage(null); save.mutate(); }}
             disabled={locked || !valid || !changed || save.isPending}
@@ -387,6 +392,22 @@ function TradingStep({ sub, onChanged }: { sub: Subscription; onChanged: () => v
           : "Торговля идёт на демо-счёте BingX VST. "}
         «Стоп» сразу прекращает новые входы; уже открытые сделки бот доводит до закрытия.
       </p>
+      {/* Owner 2026-11-16: the reasons the executor skips or fails an entry (engine REASON_TEXT, SIGNAL_TTL_MS, IOC entry). */}
+      <div className="mt-4 border border-amber-400/50 bg-amber-400/10 p-3 text-xs">
+        <p className="mb-1 font-bold">Бот может не открыть сделку по сигналу. Например:</p>
+        <ul className="list-disc space-y-0.5 pl-4">
+          <li>из-за колебаний рынка: пока выставлялся ордер, цена ушла больше чем на 0,5%, и ордер не исполнился;</li>
+          <li>сигнал дошёл до бота позже 10 минут после выхода;</li>
+          <li>цена уже за стопом сигнала;</li>
+          <li>на счёте не хватает свободной маржи;</li>
+          <li>размер сделки меньше минимального лота или минимальной суммы ордера на BingX;</li>
+          <li>по этой монете уже открыта позиция в ту же сторону;</li>
+          <li>монеты нет на BingX;</li>
+          <li>на счёте BingX включён односторонний режим позиций, а нужен раздельный (Hedge);</li>
+          <li>биржа отклонила ордер или не ответила вовремя.</li>
+        </ul>
+        <p className="mt-1">Поэтому результат вашего счёта может отличаться от результатов бота и стратегий.</p>
+      </div>
       {error && <p className="mt-3 text-sm text-destructive">{error}</p>}
     </Step>
   );

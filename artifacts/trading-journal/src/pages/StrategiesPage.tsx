@@ -164,6 +164,10 @@ function NihilistStrategies({ d }: { d: Status }) {
 
   return (
     <StrategySection title={`Как вести сделки ${BOT_BRAND_NAMES.nihilist}`} current={strategies.find((x) => x.id === current)?.label ?? current} message={msg}>
+      {/* Owner 2026-11-16 */}
+      <p className="border border-amber-400/50 bg-amber-400/10 p-3 text-xs">
+        Перед выбором стратегии рассчитайте её доходность: нажмите «{report ? "Пересчитать" : "Посчитать результаты"}». Под каждой стратегией появится результат при вашем размере сделки.
+      </p>
       <div className="flex flex-wrap items-center gap-3">
         <div className="inline-grid grid-cols-2 border border-border">
           {(["history", "live"] as const).map((n) => (
