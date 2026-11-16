@@ -1018,9 +1018,9 @@ export function createExecutor(deps: {
     // close at the end of the holding time. Owner 2026-11-16 (ERA: Nihilist moved its stop to break-even, the bot
     // did not): Nihilist's stop moves ARE followed under every strategy — only when they tighten the stop.
     if (ownMgmt(t) && cmd.type === "close" && cmd.reason !== "expired") { await done(); return; }
-    if (ownMgmt(t) && cmd.type === "move_stop" && cmd.stopPrice !== null && t.stop_price !== null && !tighter(t.side, cmd.stopPrice, t.stop_price)) { await done(); return; }
+    if (ownMgmt(t) && cmd.type === "move_stop" && cmd.stopPrice !== null && t.stop_price !== null && !tighter(t.side, await protectAtOwnEntry(t, cmd.stopPrice), t.stop_price)) { await done(); return; }
     if (cmd.type === "move_stop" && cmd.stopPrice !== null) {
-      if (t.status === "open") await replaceStop(rt, t, cmd.stopPrice, cmd.reason);
+      if (t.status === "open") await replaceStop(rt, t, await protectAtOwnEntry(t, cmd.stopPrice), cmd.reason);
       else await updateTrade(t.id, { stop_price: cmd.stopPrice });
     } else if (cmd.type === "close" && (t.status === "unknown" || t.status === "opening")) {
       await updateTrade(t.id, { pending_close_reason: sourceCloseKey(cmd) }); // closed as soon as the entry is found
@@ -1042,7 +1042,8 @@ export function createExecutor(deps: {
     if (t.status !== "open" || !t.entry_price || t.stop_price === null) return;
     // Owner 2026-11-16: the source's latest stop (break-even, trailing) under every strategy — also a move the bot
     // received before this rule and skipped. Only a tighter stop is applied, never a looser one.
-    const srcStop = await latestSourceStop(t);
+    const rawSrc = await latestSourceStop(t);
+    const srcStop = rawSrc === null ? null : await protectAtOwnEntry(t, rawSrc);
     if (srcStop !== null && tighter(t.side, srcStop, t.stop_price)) {
       await replaceStop(rt, t, srcStop, "source_stop");
       const fresh = await tradeById(t.id);
@@ -1069,6 +1070,27 @@ export function createExecutor(deps: {
   const ownMgmt = (t: Trade) => Boolean(t.mgmt && t.mgmt !== "source");
   /** a is a tighter stop than b (closer to the price on the loss side), by more than a rounding step. */
   const tighter = (side: Side, a: number, b: number) => (side === "long" ? a > b * 1.0001 : a < b * 0.9999);
+  /**
+   * Owner 2026-11-16 (ERA: Nihilist's break-even 0.07251 is its own entry; the bot entered at 0.07303 → −0.71 %):
+   * a source stop at or past the source's entry is a protected stop — on this trade it is never below the bot's own
+   * entry (break-even means the bot's zero, not the source's). A stop still on the loss side is followed as is.
+   */
+  const srcEntries = new Map<string, number | null>();
+  async function protectAtOwnEntry(t: Trade, s: number): Promise<number> {
+    if (!t.entry_price) return s;
+    let ref = srcEntries.get(t.source_signal_id);
+    if (ref === undefined) {
+      const r = await pool.query<{ body: any }>("SELECT body FROM ex_inbox WHERE kind = 'signal' AND source_signal_id = $1 ORDER BY id LIMIT 1", [t.source_signal_id]);
+      const v = Number(r.rows[0]?.body?.referencePrice ?? r.rows[0]?.body?.entryPrice);
+      ref = Number.isFinite(v) && v > 0 ? v * (await factorOf(t)) : null;
+      srcEntries.set(t.source_signal_id, ref);
+    }
+    if (ref === null) return s;
+    const long = t.side === "long";
+    const protectedStop = long ? s >= ref * 0.9995 : s <= ref * 1.0005;
+    if (!protectedStop) return s;
+    return long ? Math.max(s, t.entry_price) : Math.min(s, t.entry_price);
+  }
   /** The last stop the source moved this signal's stop to (in the bot's price units), or null. */
   async function latestSourceStop(t: Trade): Promise<number | null> {
     const rows = await commandsForSignal(t.source_signal_id);
@@ -1279,7 +1301,7 @@ export function createExecutor(deps: {
             return;
           }
           if (cur.status !== "open") return;
-          const stop = s.stop === null ? null : s.stop * (await factorOf(cur));
+          const stop = s.stop === null ? null : await protectAtOwnEntry(cur, s.stop * (await factorOf(cur)));
           if (stop !== null && cur.stop_price !== null &&
             (cur.side === "long" ? stop > cur.stop_price * 1.0005 : stop < cur.stop_price * 0.9995)) {
             await replaceStop(rt, cur, stop, "source_sync");

@@ -82,3 +82,10 @@ test("own take way follows Nihilist's break-even (owner 2026-11-16, ERA)", () =>
   assert.equal(r.status === "closed" && r.reason, "breakeven");
   assert.equal(r.status === "closed" && r.pnlPct, -0.1);
 });
+
+test("break-even of the source = the bot's own entry when the bot entered worse (owner 2026-11-16, ERA −0.71 %)", () => {
+  const sig = { ...long, ref: 99 };
+  const cmds: SimCommand[] = [{ at: T0 + 2 * M + 1000, type: "move_stop", stopPrice: 99, fraction: null, reason: "breakeven", cancel: false }];
+  const r = simulate(sig, cmds, bars([[100], [103], [105], [98, 100, 97]]), way("source"), NOW);
+  assert.equal(r.status === "closed" && r.pnlPct, -0.1); // stop at 100 (own entry), not 99
+});

@@ -32,7 +32,7 @@ export const CAB_WAYS: Array<{ id: string; take: number | null }> = [
 ];
 
 export type Candle = { t: number; o: number; h: number; l: number; c: number };
-export type SimSignal = { id: string; source: Source; symbol: string; side: Side; pattern: string | null; receivedAt: number; stop: number; maxHoldH: number | null };
+export type SimSignal = { id: string; source: Source; symbol: string; side: Side; pattern: string | null; receivedAt: number; stop: number; maxHoldH: number | null; ref?: number | null };
 export type SimCommand = { at: number; type: "close" | "move_stop" | "cancel_entry" | "position_review"; stopPrice: number | null; fraction: number | null; reason: string; cancel: boolean };
 export type Way = { id: string; follow: boolean; take: number | null; mgmt: Mgmt | null };
 export type Reason = "stop" | "breakeven" | "trailing" | "take" | "partial" | "timeout" | "source" | "cancel";
@@ -96,8 +96,13 @@ export function simulate(sig: SimSignal, cmds: SimCommand[], candles: Candle[], 
       if (c.cancel) { book(left, b.c, "cancel"); break; }
       if (c.type === "close" && (way.follow || c.reason === "expired")) book(c.fraction !== null && c.fraction < 0.999 ? c.fraction : left, b.c, c.reason === "expired" && way.mgmt ? "timeout" : "source");
       // Owner 2026-11-16: the source's stop moves under every way (the bot's own ways — only when tighter).
-      else if (c.type === "move_stop" && c.stopPrice && (way.follow || (long ? c.stopPrice > stop : c.stopPrice < stop))) {
-        stop = c.stopPrice;
+      else if (c.type === "move_stop" && c.stopPrice) {
+        // Owner 2026-11-16: a source stop at / past the source's entry is never below the bot's own entry (as engine.ts).
+        const ref = sig.ref ?? null;
+        const prot = ref !== null && (long ? c.stopPrice >= ref * 0.9995 : c.stopPrice <= ref * 1.0005);
+        const s2 = prot ? (long ? Math.max(c.stopPrice, entry) : Math.min(c.stopPrice, entry)) : c.stopPrice;
+        if (!(way.follow || (long ? s2 > stop : s2 < stop))) continue;
+        stop = s2;
         const locked = movePct(sig.side, entry, stop);
         stopKind = locked > 0.3 ? "trailing" : locked >= -0.05 ? "breakeven" : "stop";
       }
@@ -186,6 +191,7 @@ function signalOf(id: string, body: any, receivedAt: number): SimSignal | null {
     id, source, symbol, side, receivedAt, stop,
     pattern: typeof body?.patternId === "string" ? body.patternId : typeof body?.setup === "string" ? body.setup : null,
     maxHoldH: Number.isFinite(hold) && hold > 0 ? hold : null,
+    ref: Number.isFinite(num(body?.referencePrice ?? body?.entryPrice)) && num(body?.referencePrice ?? body?.entryPrice) > 0 ? num(body?.referencePrice ?? body?.entryPrice) : null,
   };
 }
 const included = (s: SimSignal) => s.source === "nihilist" || (s.symbol !== "BTCUSDT" && CAB_PATTERNS.includes(s.pattern ?? ""));
@@ -224,7 +230,7 @@ export async function runStrategyResultsPass(log: (m: string, e?: unknown) => vo
           if (v.type === "position_review" && !cancel) continue;
           cmds.push({ at: c.received_at.getTime(), type: v.type, stopPrice: v.stopPrice !== null ? v.stopPrice * f : null, fraction: v.fraction, reason: v.reason, cancel });
         }
-        const s2 = { ...sig, stop: sig.stop * f };
+        const s2 = { ...sig, stop: sig.stop * f, ref: sig.ref ? sig.ref * f : null };
         const ways: Record<string, Result> = {};
         if (!map) for (const w of waysFor(sig.source)) ways[w.id] = { status: "skipped", why: "no_contract" };
         else {
