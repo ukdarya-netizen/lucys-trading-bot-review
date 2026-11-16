@@ -7,7 +7,7 @@ import { getSourceSettings } from "../executor/store";
 import { BTC_MAX_LEVERAGE, FAMILIES, describeBtcMm, getBtcMm, saveBtcMm } from "../executor/btcmm";
 import { closeReasonText } from "../executor/texts";
 import { subscriberTrades } from "../lib/subscriber-trades";
-import { cabReport, nihilistCall } from "./executor";
+import { cabReportFor, nihilistReportWithOwn } from "./executor";
 import { nihilistStrategies, nihilistStrategy } from "../executor/plan";
 import { describeNihilistSettings, getNihilistSettings, saveNihilistSideSettings, validNihilistSettings } from "../executor/nihilist-settings";
 
@@ -294,14 +294,14 @@ router.get("/me/bot-report/cab", async (req, res) => {
   res.setHeader("Cache-Control", "no-store");
   const row = await subscriberFor(req);
   if (row.status !== "approved") return refuse(res, 403, "not_approved", "Заявка ещё не одобрена");
-  const out = await cabReport(req.query.days);
+  const out = await cabReportFor(req.query.days, req.query.from);
   res.status(out.status).json(out.body);
 });
 router.get("/me/bot-report/nihilist", async (req, res) => {
   res.setHeader("Cache-Control", "no-store");
   const row = await subscriberFor(req);
   if (row.status !== "approved") return refuse(res, 403, "not_approved", "Заявка ещё не одобрена");
-  const out = await nihilistCall("/api/trading/strategy-report", "GET");
+  const out = await nihilistReportWithOwn();
   res.status(out.status).json(out.body);
 });
 

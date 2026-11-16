@@ -61,8 +61,10 @@ type Stats = {
 type Group = "long_filtered" | "long_all" | "short";
 type Report = {
   status: string; finishedAt: string | null; error: string | null; progress: { stage: string; done: number; total: number };
-  datasets: Array<{ name: "live" | "history"; from: string | null; to: string | null; trades: number; groups: Record<Group, Array<{ id: string; label: string; stats: Stats }>> }>;
+  datasets: Dataset[];
 };
+type Dataset = { name: "bot" | "live" | "history"; from: string | null; to: string | null; trades: number; groups: Record<Group, Array<{ id: string; label: string; stats: Stats }>> };
+type NhResponse = { running: boolean; report: Report | null; historyDays: number; own?: Dataset & { calculatedAt: string | null }; sourceError?: string };
 const SIDES: Array<[Group, string]> = [["long_filtered", "Лонги"], ["short", "Шорты"]];
 const sg = (v: number) => `${v > 0 ? "+" : v < 0 ? "−" : ""}${num(Math.abs(v))}`;
 const tone = (v: number) => (v > 0 ? "text-success" : v < 0 ? "text-destructive" : "");
@@ -94,6 +96,7 @@ function ResultLine({ name, r, money: m }: { name: string; r: Stats | undefined;
 
 type CabReport = {
   days: number | null; from: string | null; to: string | null; trades: number;
+  own?: boolean; signals?: number; calculatedAt?: string | null; staleAt?: string; staleError?: string;
   exits: Record<string, Stats>; byPattern: Record<string, Record<string, Stats>>;
 };
 const CAB_PERIODS: Array<[number, string]> = [[30, "30 дней"], [60, "60 дней"], [90, "90 дней"], [0, "всё время"]];
@@ -102,7 +105,12 @@ const CAB_EXITS: Array<[string, string]> = [["follow_cab", `как ${BOT_BRAND_N
 /** CAB: every strategy with its results; the chosen one is marked. */
 function CabStrategies({ d }: { d: Status }) {
   const [days, setDays] = useState(60);
-  const rep = useQuery({ queryKey: ["cab-report", days], queryFn: () => api<CabReport>(`/journal/executor/cab-report${days ? `?days=${days}` : ""}`), refetchInterval: 300_000 });
+  // Owner 2026-11-16: the bot's own results on the CAB signals it received (always there); CAB's own report as a second view.
+  const [from, setFrom] = useState<"bot" | "cab">("bot");
+  const rep = useQuery({
+    queryKey: ["cab-report", days, from],
+    queryFn: () => api<CabReport>(`/journal/executor/cab-report?days=${days}${from === "cab" ? "&from=cab" : ""}`), refetchInterval: 300_000,
+  });
   const m = depositOf(d, d.cab.settings);
   const r = rep.data;
   const toolbar = (
@@ -114,11 +122,20 @@ function CabStrategies({ d }: { d: Status }) {
               className={`min-h-10 px-3 text-xs font-bold ${days === n ? "bg-primary text-primary-foreground" : "text-muted-foreground"}`}>{label}</button>
           ))}
         </div>
-        <span className="text-xs text-muted-foreground">{rep.isLoading ? "Считается…" : rep.error ? (rep.error as Error).message : r ? `Сигналы ${d8(r.from)} — ${d8(r.to)}, закрытых сделок ${r.trades}` : ""}</span>
+        <div className="inline-grid grid-cols-2 border border-border">
+          {([["bot", "Сигналы, полученные ботом"], ["cab", `Расчёт ${BOT_BRAND_NAMES.cab}`]] as const).map(([id, label]) => (
+            <button key={id} type="button" aria-pressed={from === id} onClick={() => setFrom(id)}
+              className={`min-h-10 px-3 text-xs font-bold ${from === id ? "bg-primary text-primary-foreground" : "text-muted-foreground"}`}>{label}</button>
+          ))}
+        </div>
+        <span className="text-xs text-muted-foreground">{rep.isLoading ? "Загрузка…" : rep.error ? (rep.error as Error).message : r ? `Сигналы ${d8(r.from)} — ${d8(r.to)}, закрытых сделок ${r.trades}${r.own ? ` · обновлено ${d8(r.calculatedAt ?? null)}` : ""}` : ""}</span>
       </div>
+      {r?.staleError && <p className="text-xs text-destructive">{BOT_BRAND_NAMES.cab} сейчас не отвечает ({r.staleError}) — показан его расчёт от {d8(r.staleAt ?? null)}.</p>}
       {r && (
         <p className="text-xs text-muted-foreground">
-          Реальные закрытые сигналы {BOT_BRAND_NAMES.cab} четырёх паттернов (без BTC). Фикс засчитывается, если цена дошла до уровня, иначе — выход {BOT_BRAND_NAMES.cab}.
+          {r.own
+            ? <>Все сигналы {BOT_BRAND_NAMES.cab} четырёх паттернов (без BTC), которые получил торговый бот. Бот сам ведёт каждый сигнал каждой стратегией на 5-минутных свечах BingX: вход — цена в момент получения, стоп сигнала, внутри свечи сначала стоп, потом фикс; стопы, закрытия и отмены {BOT_BRAND_NAMES.cab} — в момент, когда бот их получил. Считается само каждые 15 минут, закрытые сделки сохраняются навсегда. </>
+            : <>Реальные закрытые сигналы {BOT_BRAND_NAMES.cab} четырёх паттернов (без BTC), расчёт самого {BOT_BRAND_NAMES.cab}. Фикс засчитывается, если цена дошла до уровня, иначе — выход {BOT_BRAND_NAMES.cab}. </>}
           Депозит — прирост при вашем размере сделки ({m.size}, плечо {LEVERAGE}x), с комиссиями, без реинвеста. «Устойчиво» — в плюсе в обеих половинах периода.
         </p>
       )}
@@ -150,15 +167,18 @@ function CabStrategies({ d }: { d: Status }) {
 }
 
 function NihilistStrategies({ d }: { d: Status }) {
-  const rep = useQuery({ queryKey: ["nihilist-report"], queryFn: () => api<{ running: boolean; report: Report | null; historyDays: number }>("/journal/executor/nihilist-report"), refetchInterval: 15_000 });
-  const [ds, setDs] = useState<"history" | "live">("history");
+  const rep = useQuery({ queryKey: ["nihilist-report"], queryFn: () => api<NhResponse>("/journal/executor/nihilist-report"), refetchInterval: 15_000 });
+  // Owner 2026-11-16: by default the bot's own results on the Nihilist signals it received (always there).
+  const [ds, setDs] = useState<Dataset["name"]>("bot");
   const [msg, setMsg] = useState<{ text: string; bad: boolean } | null>(null);
   const run = useMutation({ mutationFn: () => api("/journal/executor/nihilist-report/run", { method: "POST" }), onSuccess: () => void rep.refetch(), onError: (e) => setMsg({ text: e instanceof ApiFailure ? e.message : "Не удалось запустить", bad: true }) });
   const current = d.nihilist.settings.strategy;
   const strategies = d.nihilist.strategies;
   const report = rep.data?.report ?? null;
   const running = Boolean(rep.data?.running) || report?.status === "running";
-  const dataset = report?.datasets?.find((x) => x.name === ds) ?? report?.datasets?.[0] ?? null;
+  const own = rep.data?.own ?? null;
+  const all: Dataset[] = [...(own ? [own] : []), ...(report?.datasets ?? [])];
+  const dataset = all.find((x) => x.name === ds) ?? all[0] ?? null;
 
   const m = depositOf(d, d.nihilist.settings);
 
@@ -166,14 +186,15 @@ function NihilistStrategies({ d }: { d: Status }) {
     <StrategySection title={`Как вести сделки ${BOT_BRAND_NAMES.nihilist}`} current={strategies.find((x) => x.id === current)?.label ?? current} message={msg}>
       {/* Owner 2026-11-16 */}
       <p className="border border-amber-400/50 bg-amber-400/10 p-3 text-xs">
-        Перед выбором стратегии рассчитайте её доходность: нажмите «{report ? "Пересчитать" : "Посчитать результаты"}». Под каждой стратегией появится результат при вашем размере сделки.
+        Под каждой стратегией — результат при вашем размере сделки. «Сигналы, полученные ботом» бот считает сам каждые 15 минут, нажимать ничего не нужно.
+        Бэктест {rep.data?.historyDays ?? 60} дней и расчёт реальных сигналов считает {BOT_BRAND_NAMES.nihilist}: для них нажмите «{report ? "Пересчитать" : "Посчитать результаты"}», прежние результаты остаются до конца нового расчёта.
       </p>
       <div className="flex flex-wrap items-center gap-3">
-        <div className="inline-grid grid-cols-2 border border-border">
-          {(["history", "live"] as const).map((n) => (
-            <button key={n} type="button" aria-pressed={dataset?.name === n} onClick={() => setDs(n)} disabled={!report?.datasets?.some((x) => x.name === n)}
+        <div className="inline-grid grid-cols-3 border border-border">
+          {(["bot", "history", "live"] as const).map((n) => (
+            <button key={n} type="button" aria-pressed={dataset?.name === n} onClick={() => setDs(n)} disabled={!all.some((x) => x.name === n)}
               className={`min-h-10 px-3 text-xs font-bold disabled:opacity-40 ${dataset?.name === n ? "bg-primary text-primary-foreground" : "text-muted-foreground"}`}>
-              {n === "history" ? `Бэктест ${rep.data?.historyDays ?? 60} дней` : "Реальные сигналы"}
+              {n === "bot" ? "Сигналы, полученные ботом" : n === "history" ? `Бэктест ${rep.data?.historyDays ?? 60} дней` : `Реальные сигналы (расчёт ${BOT_BRAND_NAMES.nihilist})`}
             </button>
           ))}
         </div>
@@ -184,6 +205,7 @@ function NihilistStrategies({ d }: { d: Status }) {
         </button>
         <span className="text-xs text-muted-foreground">
           {rep.error ? (rep.error as Error).message
+            : rep.data?.sourceError ? `${BOT_BRAND_NAMES.nihilist}: ${rep.data.sourceError}`
             : !report ? `Расчёт идёт в ${BOT_BRAND_NAMES.nihilist} 20–60 минут и не задерживает сигналы.`
             : report.status === "running" ? `Идёт: ${report.progress.stage === "history" ? "бэктест" : "реальные сигналы"} ${report.progress.done} из ${report.progress.total}`
             : report.status === "failed" ? `Ошибка: ${report.error}` : `Посчитано ${d8(report.finishedAt)}`}
@@ -191,7 +213,9 @@ function NihilistStrategies({ d }: { d: Status }) {
       </div>
       {dataset && (
         <p className="text-xs text-muted-foreground">
-          {dataset.name === "history" ? `Бэктест: правила ${BOT_BRAND_NAMES.nihilist} на истории всех пар BingX` : `Реальные сигналы ${BOT_BRAND_NAMES.nihilist}`}, {d8(dataset.from)} — {d8(dataset.to)}.
+          {dataset.name === "bot"
+            ? `Все сигналы ${BOT_BRAND_NAMES.nihilist}, которые получил торговый бот: бот сам ведёт каждый сигнал каждой стратегией на 5-минутных свечах BingX (вход — цена в момент получения, стоп сигнала, внутри свечи сначала стоп; стопы, закрытия и отмены ${BOT_BRAND_NAMES.nihilist} — в момент получения; закрытие по сроку — при любой стратегии), обновлено ${d8(own?.calculatedAt ?? null)}`
+            : dataset.name === "history" ? `Бэктест: правила ${BOT_BRAND_NAMES.nihilist} на истории всех пар BingX` : `Реальные сигналы ${BOT_BRAND_NAMES.nihilist}, расчёт самого ${BOT_BRAND_NAMES.nihilist}`}, {d8(dataset.from)} — {d8(dataset.to)}.
           Депозит — прирост при вашем размере сделки ({m.size}, плечо {LEVERAGE}x), с комиссиями, без реинвеста.
           «Устойчиво» — в плюсе в обеих половинах периода.
         </p>

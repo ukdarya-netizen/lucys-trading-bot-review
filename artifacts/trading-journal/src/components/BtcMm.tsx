@@ -208,6 +208,7 @@ export function BtcMmSettings({ saved, families, maxLeverage, savePath, onSaved,
 
 type Cell = { n: number; pending: number; wins: number; losses: number; breakeven: number; sumPct: number; best: number | null; worst: number | null };
 type Report = {
+  staleAt?: string; staleError?: string;
   asOf: string; feePct: number; candles: string;
   ways: Array<{ id: string; label: string }>;
   families: Array<{ id: string; label: string }>;
@@ -234,6 +235,7 @@ export function BtcMmReport({ families }: { families: BtcMmFamily[] }) {
       </p>
       {q.isLoading && <p className="text-sm text-muted-foreground">Считается…</p>}
       {q.error && <p className="text-sm text-destructive">{(q.error as Error).message}</p>}
+      {r?.staleError && <p className="text-xs text-destructive">Bitcoin MM сейчас не отвечает ({r.staleError}) — показан его расчёт от {new Date(r.staleAt ?? r.asOf).toLocaleString("ru-RU", { timeZone: "Europe/Samara" })}.</p>}
       {r && !r.groups.length && <p className="text-sm text-muted-foreground">Сигналов пока нет.</p>}
       {r && r.groups.map((g) => {
         const best = Math.max(...r.ways.map((w) => g.ways[w.id]?.n ? g.ways[w.id]!.sumPct : -Infinity));

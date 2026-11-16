@@ -1,5 +1,5 @@
 import { useState, type ReactNode } from "react";
-import { CAB_EXITS, CAB_PATTERNS, CAB_PERIODS, d8, money, ResultLine, useCabReport, useNihilistReport } from "./subscriber/SubBots";
+import { CAB_EXITS, CAB_PATTERNS, CAB_PERIODS, d8, money, nhDatasets, ResultLine, useCabReport, useNihilistReport } from "./subscriber/SubBots";
 import { useClerk } from "@clerk/react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { CheckCircle2, Clock, KeyRound, LogOut, Play, ShieldX, Square, Target } from "lucide-react";
@@ -232,8 +232,8 @@ function StrategyStep({ sub, choices, onChanged }: { sub: Subscription; choices:
               void info.refetch(); onChanged();
             }}
             extra={(strategy, side) => {
-                  const ds = nhRep.data?.report?.datasets?.find((x) => x.name === "live") ?? null;
-                  const hist = nhRep.data?.report?.datasets?.find((x) => x.name === "history") ?? null;
+                  const ds = nhDatasets(nhRep.data).find((x) => x.name === "live") ?? null;
+                  const hist = nhDatasets(nhRep.data).find((x) => x.name === "history") ?? null;
                   const group = side === "long" ? "long_filtered" : "short";
                   const line = (d: typeof ds) => d?.groups?.[group]?.find((x) => x.id === strategy)?.stats;
                   if (!ds && !hist) return null;

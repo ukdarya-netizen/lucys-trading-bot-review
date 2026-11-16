@@ -12,6 +12,7 @@ import {
 import { CONTROL_TARGETS, getTradingControl, productionTrading, saveTradingControl } from "../executor/trading-controls";
 import { describeNihilistSettings, getNihilistSettings, saveNihilistSideSettings, validNihilistSettings } from "../executor/nihilist-settings";
 import { telegramSender } from "../executor/telegram";
+import { getResult, ownCabReport, ownNihilistDataset, putResult } from "../executor/strategy-results";
 
 /** Owner: the new executor's accounts, trades and events (owner 2026-11-02). */
 const router: IRouter = Router();
@@ -170,9 +171,37 @@ router.post("/journal/executor/btcmm-settings", requireJournalSession, requireJo
 // Bitcoin MM's virtual panel (owner 2026-11-14): the ladders on its signals, read from Bitcoin MM with its token.
 router.get("/journal/executor/btcmm-report", requireJournalSession, requireJournalOwner, async (_req, res) => {
   res.setHeader("Cache-Control", "no-store");
-  const out = await btcMmReport();
+  const out = await cached("src:btcmm", await btcMmReport(), (b) => Array.isArray(b?.groups));
   res.status(out.status).json(out.body);
 });
+
+/**
+ * Owner 2026-11-16: a report read from another bot is kept here after every good answer; when that bot does not
+ * answer (publishing, error, timeout) the last good one is shown with the error, never an empty page.
+ */
+export async function cached(key: string, out: { status: number; body: any }, good: (b: any) => boolean): Promise<{ status: number; body: any }> {
+  if (out.status === 200 && good(out.body)) {
+    await putResult(key, { at: Date.now(), body: out.body }).catch(() => undefined);
+    return out;
+  }
+  const last = await getResult<{ at: number; body: any }>(key).catch(() => null);
+  if (!last) return out;
+  return { status: 200, body: { ...last.body, staleAt: new Date(last.at).toISOString(), staleError: out.body?.error?.message ?? "нет ответа" } };
+}
+const hasDatasets = (b: any) => Array.isArray(b?.report?.datasets) && b.report.datasets.length > 0;
+/** Nihilist's report + the bot's own results on the Nihilist signals it received (dataset «bot»). */
+export async function nihilistReportWithOwn(): Promise<{ status: number; body: any }> {
+  const live = await nihilistCall("/api/trading/strategy-report", "GET");
+  let src = live;
+  if (live.status === 200 && !hasDatasets(live.body)) {
+    // A run in progress or a failed run at Nihilist: its status, with the last finished results kept here.
+    const last = await getResult<{ at: number; body: any }>("src:nihilist").catch(() => null);
+    if (last && hasDatasets(last.body)) src = { status: 200, body: { ...live.body, report: { ...(live.body.report ?? last.body.report), datasets: last.body.report.datasets, finishedAt: last.body.report.finishedAt } } };
+  } else src = await cached("src:nihilist", live, hasDatasets);
+  const own = await ownNihilistDataset();
+  const body = src.status === 200 ? src.body : { running: false, report: null, historyDays: 60, sourceError: src.body?.error?.message ?? "Нигилист не ответил" };
+  return { status: 200, body: { ...body, own } };
+}
 // Nihilist's strategy report, read from Nihilist with the trading token (owner 2026-11-03).
 function nihilistBase(): string | null {
   const explicit = process.env.NIHILIST_BASE_URL?.trim();
@@ -193,7 +222,7 @@ export async function nihilistCall(path: string, method: "GET" | "POST") {
 }
 router.get("/journal/executor/nihilist-report", requireJournalSession, requireJournalOwner, async (_req, res) => {
   res.setHeader("Cache-Control", "no-store");
-  const out = await nihilistCall("/api/trading/strategy-report", "GET");
+  const out = await nihilistReportWithOwn();
   res.status(out.status).json(out.body);
 });
 router.post("/journal/executor/nihilist-report/run", requireJournalSession, requireJournalOwner, async (_req, res) => {
@@ -219,7 +248,12 @@ export async function cabReport(daysRaw: unknown): Promise<{ status: number; bod
 }
 router.get("/journal/executor/cab-report", requireJournalSession, requireJournalOwner, async (req, res) => {
   res.setHeader("Cache-Control", "no-store");
-  const out = await cabReport(req.query.days);
+  const out = await cabReportFor(req.query.days, req.query.from);
   res.status(out.status).json(out.body);
 });
+/** Owner 2026-11-16: by default the bot's own results on the CAB signals it received; from=cab — CAB's own report (kept here). */
+export async function cabReportFor(days: unknown, from: unknown): Promise<{ status: number; body: any }> {
+  if (from === "cab") return cached(`src:cab:${String(days ?? "")}`, await cabReport(days), (b) => Boolean(b?.exits));
+  return { status: 200, body: await ownCabReport(days) };
+}
 export default router;

@@ -2,6 +2,7 @@ import app from "./app";
 import { logger } from "./lib/logger";
 import { startBotWorker, stopBotWorker } from "./bullet-bot/bot-runtime.mjs";
 import { executorEnabled, startExecutor } from "./executor";
+import { startStrategyResults } from "./executor/strategy-results";
 import { startSubscriberBot } from "./lib/subscriber-bot";
 import { auditLiveFunding } from "./lib/live-funding-audit";
 import { pool } from "@workspace/db";
@@ -35,6 +36,9 @@ const server = app.listen(port, (err) => {
 void ensureRuntimeTables(pool).catch((err: unknown) => {
   logger.error({ err }, "Runtime tables could not be ensured");
 });
+
+// Owner 2026-11-16: the bot's own results of every strategy on the signals it received (production only).
+startStrategyResults((msg, extra) => (extra ? logger.warn({ err: extra }, msg) : logger.info(msg)));
 
 // New executor (owner 2026-11-02 rewrite): the old VST / PAPER workers stay off.
 if (executorEnabled()) {

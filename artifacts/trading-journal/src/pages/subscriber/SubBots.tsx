@@ -14,11 +14,21 @@ type Stats = {
   half1: { n: number; avg: number | null }; half2: { n: number; avg: number | null };
 };
 type CabReport = { days: number | null; from: string | null; to: string | null; trades: number; exits: Record<string, Stats>; byPattern: Record<string, Record<string, Stats>> };
+type NhDataset = { name: "live" | "history"; from: string | null; to: string | null; trades: number; groups: Record<Group, Array<{ id: string; label: string; stats: Stats }>> };
 type Group = "long_filtered" | "long_all" | "short";
 type NhReport = {
   status: string; finishedAt: string | null; error: string | null;
-  datasets: Array<{ name: "live" | "history"; from: string | null; to: string | null; trades: number; groups: Record<Group, Array<{ id: string; label: string; stats: Stats }>> }>;
+  datasets: NhDataset[];
 };
+type NhResponse = { running: boolean; report: NhReport | null; historyDays: number; own?: Omit<NhDataset, "name"> & { name: "bot" } };
+/**
+ * Owner 2026-11-16: «Реальные сигналы» are the bot's own results on the signals it received (counted by the bot
+ * itself, always there); the backtest is the bot's 60-day history.
+ */
+export function nhDatasets(data: NhResponse | undefined): NhDataset[] {
+  const own = data?.own && (data.own.trades > 0 || data.own.from) ? [{ ...data.own, name: "live" as const }] : [];
+  return [...own, ...(data?.report?.datasets ?? []).filter((x) => x.name === "history")];
+}
 
 const CAB_EXITS: Array<[string, string]> = [["follow_cab", `Как ${BOT_BRAND_NAMES.cab}`], ["take5", "Фикс +5%"], ["take8", "Фикс +8%"], ["take10", "Фикс +10%"]];
 const CAB_PATTERNS: Array<[string, string]> = [
@@ -47,7 +57,7 @@ export function useCabReport(days: number) {
   return useQuery({ queryKey: ["me-bot-cab", days], queryFn: () => api<CabReport>(`/me/bot-report/cab${days ? `?days=${days}` : ""}`), refetchInterval: 300_000 });
 }
 export function useNihilistReport() {
-  return useQuery({ queryKey: ["me-bot-nihilist"], queryFn: () => api<{ running: boolean; report: NhReport | null; historyDays: number }>("/me/bot-report/nihilist"), refetchInterval: 60_000 });
+  return useQuery({ queryKey: ["me-bot-nihilist"], queryFn: () => api<NhResponse>("/me/bot-report/nihilist"), refetchInterval: 60_000 });
 }
 
 /** One line of results inside a strategy card of the cabinet (owner 2026-11-06: choose by the numbers). */
@@ -134,20 +144,21 @@ function Nihilist({ m }: { m: Money }) {
   const q = useNihilistReport();
   const [ds, setDs] = useState<"history" | "live">("live");
   const report = q.data?.report ?? null;
-  const dataset = report?.datasets?.find((x) => x.name === ds) ?? report?.datasets?.[0] ?? null;
+  const all = nhDatasets(q.data);
+  const dataset = all.find((x) => x.name === ds) ?? all[0] ?? null;
   const ids = dataset ? [...new Map([...(dataset.groups?.long_filtered ?? []), ...(dataset.groups?.short ?? [])].map((x) => [x.id, x.label])).entries()] : [];
   return (
     <div className="space-y-3">
       <div className="flex flex-wrap items-center gap-3">
         <div className="inline-grid grid-cols-2 border border-border">
           {(["live", "history"] as const).map((n) => (
-            <button key={n} type="button" aria-pressed={dataset?.name === n} onClick={() => setDs(n)} disabled={!report?.datasets?.some((x) => x.name === n)}
+            <button key={n} type="button" aria-pressed={dataset?.name === n} onClick={() => setDs(n)} disabled={!all.some((x) => x.name === n)}
               className={`min-h-10 px-3 text-xs font-bold disabled:opacity-40 ${dataset?.name === n ? "bg-primary text-primary-foreground" : "text-muted-foreground"}`}>
               {n === "history" ? `Бэктест ${q.data?.historyDays ?? 60} дней` : "Реальные сигналы"}
             </button>
           ))}
         </div>
-        {dataset && <span className="text-xs text-muted-foreground">{d8(dataset.from)} — {d8(dataset.to)} · посчитано {d8(report?.finishedAt ?? null)}</span>}
+        {dataset && <span className="text-xs text-muted-foreground">{d8(dataset.from)} — {d8(dataset.to)}{dataset.name === "history" ? ` · посчитано ${d8(report?.finishedAt ?? null)}` : ""}</span>}
       </div>
       <Fail q={q} />
       {q.data && !dataset && <p className="border border-border bg-card p-4 text-sm text-muted-foreground">Результаты ещё не посчитаны.</p>}

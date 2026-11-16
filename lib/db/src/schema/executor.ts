@@ -129,3 +129,13 @@ export const botTelegramStateTable = pgTable("bot_telegram_state", {
   key: text("key").primaryKey(),
   value: text("value").notNull(),
 });
+
+/**
+ * The bot's own strategy results (owner 2026-11-16; executor/strategy-results.ts creates the same table at start):
+ * sig:<signal id> — every strategy on one received signal; src:<bot> — the last good report read from that bot.
+ */
+export const exStrategyResultsTable = pgTable("ex_strategy_results", {
+  key: text("key").primaryKey(),
+  body: jsonb("body").notNull(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+});
