@@ -10,7 +10,7 @@
  *  - CAB: «как CAB» — CAB's stop moves, closes and cancellations; +5 / +8 / +10 % — the same plus a take;
  *  - Nihilist: «как Нигилист» — its stop moves, closes and cancellations; the bot's own ways (plan.ts manageStep:
  *    break-even, partial, trailing, take) with Nihilist's holding time; Nihilist's close at the end of the
- *    holding time and its cancellations apply to every way (as engine.ts);
+ *    holding time, its cancellations and its stop moves that tighten the stop apply to every way (as engine.ts);
  *  - fee 0.1 % of the price per round trip.
  * Results are kept in ex_strategy_results: a closed signal is final and never recalculated; open ones are
  * recalculated every 15 minutes (production only — dev makes no BingX calls). Nothing depends on CAB or
@@ -95,7 +95,8 @@ export function simulate(sig: SimSignal, cmds: SimCommand[], candles: Candle[], 
       const c = ordered[ci]!;
       if (c.cancel) { book(left, b.c, "cancel"); break; }
       if (c.type === "close" && (way.follow || c.reason === "expired")) book(c.fraction !== null && c.fraction < 0.999 ? c.fraction : left, b.c, c.reason === "expired" && way.mgmt ? "timeout" : "source");
-      else if (c.type === "move_stop" && way.follow && c.stopPrice) {
+      // Owner 2026-11-16: the source's stop moves under every way (the bot's own ways — only when tighter).
+      else if (c.type === "move_stop" && c.stopPrice && (way.follow || (long ? c.stopPrice > stop : c.stopPrice < stop))) {
         stop = c.stopPrice;
         const locked = movePct(sig.side, entry, stop);
         stopKind = locked > 0.3 ? "trailing" : locked >= -0.05 ? "breakeven" : "stop";

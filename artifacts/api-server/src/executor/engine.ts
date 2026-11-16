@@ -1014,9 +1014,11 @@ export function createExecutor(deps: {
       await done();
       return;
     }
-    // The bot manages this Nihilist trade itself: Nihilist's stop moves and closes are not followed,
-    // except a close at the end of the holding time (the same limit as the bot's own).
-    if (ownMgmt(t) && (cmd.type === "move_stop" || (cmd.type === "close" && cmd.reason !== "expired"))) { await done(); return; }
+    // The bot takes profit itself on this Nihilist trade (its own take): Nihilist's closes are not followed, except a
+    // close at the end of the holding time. Owner 2026-11-16 (ERA: Nihilist moved its stop to break-even, the bot
+    // did not): Nihilist's stop moves ARE followed under every strategy — only when they tighten the stop.
+    if (ownMgmt(t) && cmd.type === "close" && cmd.reason !== "expired") { await done(); return; }
+    if (ownMgmt(t) && cmd.type === "move_stop" && cmd.stopPrice !== null && t.stop_price !== null && !tighter(t.side, cmd.stopPrice, t.stop_price)) { await done(); return; }
     if (cmd.type === "move_stop" && cmd.stopPrice !== null) {
       if (t.status === "open") await replaceStop(rt, t, cmd.stopPrice, cmd.reason);
       else await updateTrade(t.id, { stop_price: cmd.stopPrice });
@@ -1038,11 +1040,20 @@ export function createExecutor(deps: {
    */
   async function manage(rt: Runtime, t: Trade): Promise<void> {
     if (t.status !== "open" || !t.entry_price || t.stop_price === null) return;
+    // Owner 2026-11-16: the source's latest stop (break-even, trailing) under every strategy — also a move the bot
+    // received before this rule and skipped. Only a tighter stop is applied, never a looser one.
+    const srcStop = await latestSourceStop(t);
+    if (srcStop !== null && tighter(t.side, srcStop, t.stop_price)) {
+      await replaceStop(rt, t, srcStop, "source_stop");
+      const fresh = await tradeById(t.id);
+      if (!fresh || fresh.status !== "open" || fresh.stop_price === null) return;
+      t = fresh;
+    }
     const m = nihilistStrategy(t.mgmt);
     if (t.max_hold_h && t.opened_at && now() - t.opened_at.getTime() >= t.max_hold_h * 3_600_000) { await closeMarket(rt, t, "timeout"); return; }
     const q = await rt.ex.ticker(t.symbol, "normal");
     if (!(q.last > 0)) return;
-    const peak = Math.max(t.peak_pct ?? 0, movePct(t.side, t.entry_price, q.last));
+    const peak = Math.max(t.peak_pct ?? 0, movePct(t.side, t.entry_price!, q.last));
     let cur = peak > (t.peak_pct ?? 0) ? await updateTrade(t.id, { peak_pct: peak }) : t;
     const step = manageStep({ side: cur.side, entry: cur.entry_price!, stop: cur.stop_price!, peakPct: peak, partialDone: cur.partial_done, beMoved: cur.be_moved, m });
     const initialQty = cur.initial_qty;
@@ -1056,6 +1067,20 @@ export function createExecutor(deps: {
     if (step.stop !== null) await replaceStop(rt, cur, step.stop, step.be && !t.be_moved && !(m.trail && peak >= m.trail.act) ? "breakeven" : "trailing");
   }
   const ownMgmt = (t: Trade) => Boolean(t.mgmt && t.mgmt !== "source");
+  /** a is a tighter stop than b (closer to the price on the loss side), by more than a rounding step. */
+  const tighter = (side: Side, a: number, b: number) => (side === "long" ? a > b * 1.0001 : a < b * 0.9999);
+  /** The last stop the source moved this signal's stop to (in the bot's price units), or null. */
+  async function latestSourceStop(t: Trade): Promise<number | null> {
+    const rows = await commandsForSignal(t.source_signal_id);
+    let best: { seq: number; stop: number } | null = null;
+    for (const r of rows) {
+      const p = parseCommand(r.body, r.received_at.getTime());
+      if (!p.ok || p.value.type !== "move_stop" || p.value.stopPrice === null) continue;
+      const seq = p.value.seq ?? r.received_at.getTime();
+      if (!best || seq >= best.seq) best = { seq, stop: p.value.stopPrice };
+    }
+    return best ? best.stop * (await factorOf(t)) : null;
+  }
   /** A close the source asked for (its close or its cancellation) waits on this trade. */
   const sourcePending = (r: string | null | undefined) => Boolean(r && (r.startsWith("source") || isCancelReason(r)));
   const missingAtSource = new Map<string, number>();
@@ -1233,16 +1258,18 @@ export function createExecutor(deps: {
         const s = map.get(t.source_signal_id);
         if (!s) continue;
         const actionKind = sourceActionKind(s.action, s.status);
-        if (actionKind === "review" || (ownMgmt(t) && actionKind !== "close")) continue;
+        if (actionKind === "review") continue;
+        // Owner 2026-11-16: under the bot's own take the source's stop is still followed (tighter only).
+        const stopOnly = ownMgmt(t) && actionKind !== "close";
         await withLock(rt, t.symbol, async () => {
           const cur = await tradeById(t.id);
           if (!cur || !["opening", "open", "closing", "unknown"].includes(cur.status)) return;
           // Owner 2026-11-09: a signal the source cancelled / reclassified, or that is gone at the source two syncs
           // in a row, is closed as a cancellation found by the sync — not as an ordinary close.
           const st = (s.status ?? "").toLowerCase();
-          const gone = actionKind === "unknown" && s.status == null && (missingAtSource.get(s.sourceSignalId) ?? 0) >= 2;
+          const gone = !stopOnly && actionKind === "unknown" && s.status == null && (missingAtSource.get(s.sourceSignalId) ?? 0) >= 2;
           const cancelled = st === "cancelled" || st === "canceled" || st === "reclassified" || gone;
-          if (actionKind === "close" || gone) {
+          if (!stopOnly && (actionKind === "close" || gone)) {
             const key = cancelled ? cancelKey(gone ? "removed" : st, true) : "source_sync";
             if (cur.status === "opening" || cur.status === "unknown") {
               await updateTrade(cur.id, { pending_close_reason: cancelled ? key : "source:source_sync" });

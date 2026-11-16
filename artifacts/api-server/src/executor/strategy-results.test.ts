@@ -75,3 +75,10 @@ test("the bot's stop is the source's stop rounded away from the price, on the la
   assert.equal(stopAt("short", 0.123446, c), "0.1235");
   assert.equal(TRIGGER_PRICE, "CONTRACT_PRICE");
 });
+
+test("own take way follows Nihilist's break-even (owner 2026-11-16, ERA)", () => {
+  const cmds: SimCommand[] = [{ at: T0 + 2 * M + 1000, type: "move_stop", stopPrice: 100, fraction: null, reason: "breakeven", cancel: false }];
+  const r = simulate(long, cmds, bars([[100], [103], [105], [99, 100, 98]]), way("take10"), NOW);
+  assert.equal(r.status === "closed" && r.reason, "breakeven");
+  assert.equal(r.status === "closed" && r.pnlPct, -0.1);
+});
