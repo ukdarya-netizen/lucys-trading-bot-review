@@ -94,6 +94,19 @@ export default function TradeOverview() {
   const span = firstDay ? `${d8(firstDay)} — ${d8(today)}` : "сделок ещё нет";
   const bal = d.accounts.find((a) => a.id === account)?.balance ?? null;
   const name = filter === "all" ? "все боты" : BOT_BRAND_NAMES[filter];
+  // Owner 2026-11-16 («как человек должен понять, сколько бот зарабатывает»): every account in % of its deposit —
+  // the accounts differ in size and money, the percent compares them. Deposit at the start of the period = balance
+  // now − closed result of the period − result of the open positions (deposits / withdrawals not known).
+  const earn = accounts.map((id) => {
+    const rows = d.totals.filter((t) => t.accountId === id && t.day && (!fromDay || t.day >= fromDay) && (filter === "all" || t.source === filter));
+    const p = rows.reduce((s, t) => s + t.pnl, 0);
+    const c = rows.reduce((s, t) => s + t.closed - (t.cancelled ?? 0), 0);
+    const w = rows.reduce((s, t) => s + t.wins, 0);
+    const fl = d.open.filter((t) => t.accountId === id && (filter === "all" || t.source === filter)).reduce((s, t) => s + (t.unrealized ?? 0), 0);
+    const b = d.accounts.find((a) => a.id === id)?.balance ?? null;
+    const start = b ? b.equity - p - fl : null;
+    return { id, p, n: rows.reduce((s, t) => s + t.closed, 0), c, w, pct: start && start > 0 ? (p / start) * 100 : null };
+  });
   const num2 = (v: number) => v.toLocaleString("ru-RU", { maximumFractionDigits: 2 });
 
   return (
@@ -121,6 +134,21 @@ export default function TradeOverview() {
       <p className="text-xs text-muted-foreground">
         Счёт <b className="text-foreground">{kind}</b> ({ACCOUNT_TEXT[kind]}) · {name} · период <b className="text-foreground">{span}</b>. Все суммы — в {asset}; счета не складываются.
       </p>
+
+      <section className="border border-border bg-card p-4" data-testid="earnings">
+        <h2 className="text-base font-bold">Сколько заработал бот · {name} · {span}</h2>
+        <div className="mt-3 grid gap-3 sm:grid-cols-3">
+          {earn.map((e) => (
+            <button key={e.id} type="button" onClick={() => setAcc(e.id)} className={`border p-4 text-left ${e.id === account ? "border-primary" : "border-border"}`}>
+              <p className="text-xs font-bold uppercase text-muted-foreground">{accountKind(e.id)} · {ACCOUNT_TEXT[accountKind(e.id)]}</p>
+              <p className={`mt-1 text-3xl font-bold tabular ${toneClass(e.n ? e.p : null)}`}>{e.pct === null ? "—" : `${e.pct > 0 ? "+" : ""}${e.pct.toFixed(1).replace(".", ",")}%`}</p>
+              <p className="text-xs text-muted-foreground">к депозиту</p>
+              <p className="mt-2 text-sm tabular"><b className={toneClass(e.n ? e.p : null)}>{formatUsdt(e.p)} {assetOfAccount(e.id)}</b> · {e.n} сделок{e.c > 0 ? ` · ${Math.round((e.w / e.c) * 100)}% в плюс` : ""}</p>
+            </button>
+          ))}
+        </div>
+        <p className="mt-2 text-xs text-muted-foreground">Счета разного размера и в разных деньгах — сравнивайте проценты. Процент — закрытые сделки за период к депозиту на начало периода; пополнения и выводы не учитываются. Нажмите на счёт — ниже подробности по нему.</p>
+      </section>
 
       <section className="grid grid-cols-2 gap-3 lg:grid-cols-6">
         <div className="col-span-2 lg:col-span-3"><Kpi icon={<Wallet className="h-5 w-5" />} label={`Баланс счёта ${kind}`} value={bal ? `${num2(bal.equity)} ${asset}` : "—"} hint={bal ? `свободно ${num2(bal.available)} ${asset} · сейчас` : "баланс этого счёта сейчас не прочитан"} /></div>

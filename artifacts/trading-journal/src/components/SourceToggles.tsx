@@ -11,6 +11,7 @@ import { LoadingOrError, useExecutor, type Status } from "@/components/executor-
 import { InboxLine } from "@/components/SourceSettings";
 import { BtcMmSettings } from "@/components/BtcMm";
 import { OwnerStrategyCard } from "@/components/owner-strategy-card";
+import { TradeWarnings } from "@/components/TradeWarnings";
 import { NihilistSideSettings } from "@/components/NihilistSideSettings";
 import { SizeInput, marginOf, num } from "@/components/form-bits";
 import { BotBrand, BOT_BRAND_NAMES, BOT_SOURCES, type BotSource } from "@/components/BotBrand";
@@ -72,6 +73,7 @@ export function MainAccountToggles() {
           </div>
         )}
       </section>
+      <TradeWarnings />
       <OwnerKeyCard q={acc} onSaved={refetch} />
       <div role="tablist" className="flex gap-1 border-b border-border">
         {SOURCES.map((s) => (
