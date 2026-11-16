@@ -9,7 +9,7 @@ import { Switch } from "@/components/ui/switch";
 import { api, ApiFailure } from "@/lib/subscriber-api";
 import { LoadingOrError, useExecutor, type Status } from "@/components/executor-ui";
 import { InboxLine } from "@/components/SourceSettings";
-import { BtcMmReport, BtcMmSettings } from "@/components/BtcMm";
+import { BtcMmSettings } from "@/components/BtcMm";
 import { OwnerStrategyCard } from "@/components/owner-strategy-card";
 import { NihilistSideSettings } from "@/components/NihilistSideSettings";
 import { SizeInput, marginOf, num } from "@/components/form-bits";
@@ -84,11 +84,8 @@ export function MainAccountToggles() {
       {acc.data ? <BotTrading key={`t-${tab}`} source={tab} d={d} info={acc.data} onSaved={refetch} />
         : <p className={`text-sm ${acc.error ? "text-destructive" : "text-muted-foreground"}`}>{acc.error ? `Счета не загрузились: ${(acc.error as Error).message}` : "Загрузка счетов…"}</p>}
       {tab === "cab" ? <OwnerStrategyCard /> : tab === "nihilist" ? <NihilistStrategyChoice d={d} onSaved={refetch} /> : (
-        <>
-          <BtcMmSettings key={`mm-${mode}`} saved={d.btc.mm} families={d.btc.families} maxLeverage={d.btc.maxLeverage}
-            savePath="/journal/executor/btcmm-settings" onSaved={refetch} equity={account?.balance?.equity ?? null} asset={asset} ownerNote />
-          <BtcMmReport families={d.btc.families} />
-        </>
+        <BtcMmSettings key={`mm-${mode}`} saved={d.btc.mm} families={d.btc.families} maxLeverage={d.btc.maxLeverage}
+          savePath="/journal/executor/btcmm-settings" onSaved={refetch} equity={account?.balance?.equity ?? null} asset={asset} ownerNote />
       )}
     </div>
   );
