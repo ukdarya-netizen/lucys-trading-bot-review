@@ -2,6 +2,7 @@
  * Subscriber pages (owner 2026-11-06): what an approved subscriber sees on desktop and in the Telegram
  * Mini App — overview, own positions, own history, cabinet. Own account only (/api/me/*).
  */
+import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { BotBrand, BOT_BRAND_NAMES, BOT_SOURCES, type BotSource } from "@/components/BotBrand";
 import { api, type Subscription } from "@/lib/subscriber-api";
@@ -33,6 +34,31 @@ export function useSubscription() {
 }
 
 export type BotFilter = "all" | BotSource;
+
+/**
+ * Owner 2026-11-16: VST and REAL are different money — amounts carry their unit (VST / USDT) and the two accounts
+ * are never summed: the pages show one account, the current one by default.
+ */
+export const SUB_ASSET: Record<"vst" | "real", string> = { vst: "VST", real: "USDT" };
+export function useSubAccount(trades: SubTrade[] | undefined): ["vst" | "real", (v: "vst" | "real") => void, Array<"vst" | "real">] {
+  const sub = useSubscription();
+  const [picked, setPicked] = useState<"vst" | "real" | null>(null);
+  const have = [...new Set((trades ?? []).map((t) => t.account))].sort() as Array<"vst" | "real">;
+  const current = sub.data?.subscription?.tradingAccount === "real" ? "real" : "vst";
+  return [picked ?? current, setPicked, have];
+}
+export function AccountTabs({ value, onChange, have }: { value: "vst" | "real"; onChange: (v: "vst" | "real") => void; have: Array<"vst" | "real"> }) {
+  const list = [...new Set([value, ...have])];
+  if (list.length < 2) return <span className="text-xs text-muted-foreground">Счёт: {value === "real" ? "реальный, суммы в USDT" : "демо, суммы в VST"}</span>;
+  return (
+    <div className="inline-grid grid-cols-2 border border-border">
+      {list.map((a) => (
+        <button key={a} type="button" aria-pressed={value === a} onClick={() => onChange(a)}
+          className={`min-h-10 px-3 text-xs font-bold ${value === a ? "bg-primary text-primary-foreground" : "text-muted-foreground"}`}>{a === "real" ? "Реальный · USDT" : "Демо · VST"}</button>
+      ))}
+    </div>
+  );
+}
 export function BotFilterTabs({ value, onChange }: { value: BotFilter; onChange: (v: BotFilter) => void }) {
   return (
     <div className="inline-grid grid-cols-4 border border-border">

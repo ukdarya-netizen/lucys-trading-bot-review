@@ -273,13 +273,14 @@ export async function executorStatus(): Promise<unknown> {
     pool.query("SELECT * FROM ex_trades WHERE status IN ('opening','open','closing','unknown') ORDER BY id DESC"),
     pool.query("SELECT * FROM ex_trades WHERE status = 'closed' ORDER BY closed_at DESC NULLS LAST, id DESC LIMIT 500"),
     pool.query("SELECT * FROM ex_trades WHERE status IN ('skipped','failed') ORDER BY id DESC LIMIT 300"),
-    pool.query(`SELECT account_id, source, side, count(*)::int AS closed,
+    // Owner 2026-11-16 («за какой период — неясно»): by day (Samara time) too, so the page counts any period.
+    pool.query(`SELECT account_id, source, side, to_char(closed_at AT TIME ZONE 'Europe/Samara', 'YYYY-MM-DD') AS day, count(*)::int AS closed,
                        count(*) FILTER (WHERE pnl > 0 AND NOT ${CANCEL_SQL})::int AS wins, count(*) FILTER (WHERE pnl < 0 AND NOT ${CANCEL_SQL})::int AS losses,
                        count(*) FILTER (WHERE ${CANCEL_SQL})::int AS cancelled,
                        coalesce(sum(pnl) FILTER (WHERE ${CANCEL_SQL}), 0)::float8 AS cancelled_pnl,
                        count(*) FILTER (WHERE close_reason = 'liquidation')::int AS liquidations,
                        coalesce(sum(pnl), 0)::float8 AS pnl
-                FROM ex_trades WHERE status = 'closed' GROUP BY 1, 2, 3 ORDER BY 1, 2, 3`),
+                FROM ex_trades WHERE status = 'closed' GROUP BY 1, 2, 3, 4 ORDER BY 1, 2, 3, 4`),
     pool.query(`SELECT source, reason, count(*)::int AS n FROM ex_trades WHERE status IN ('skipped','failed') GROUP BY 1, 2 ORDER BY 3 DESC`),
   ]);
   const lv = await live(openQ.rows);
@@ -314,7 +315,7 @@ export async function executorStatus(): Promise<unknown> {
     open,
     closed: closedQ.rows.map(tradeView),
     skipped: skippedQ.rows.map(tradeView),
-    totals: totalsQ.rows.map((r) => ({ accountId: r.account_id, source: r.source, sourceName: SOURCE_NAME[r.source] ?? r.source, side: r.side,
+    totals: totalsQ.rows.map((r) => ({ accountId: r.account_id, source: r.source, sourceName: SOURCE_NAME[r.source] ?? r.source, side: r.side, day: r.day as string | null,
       closed: r.closed, wins: r.wins, losses: r.losses, liquidations: r.liquidations, pnl: Number(r.pnl),
       cancelled: r.cancelled, cancelledPnl: Number(r.cancelled_pnl) })),
     skippedTotals: skipTotalsQ.rows.map((r) => ({ source: r.source, sourceName: SOURCE_NAME[r.source] ?? r.source, reason: r.reason,

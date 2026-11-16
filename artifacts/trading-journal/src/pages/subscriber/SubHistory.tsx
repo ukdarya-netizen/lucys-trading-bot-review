@@ -1,16 +1,18 @@
 import { useMemo, useState } from "react";
 import { PERIODS, inPeriod, summarize, type PeriodId } from "@/lib/performance";
-import { BotFilterTabs, duration, formatPercent, formatUsdt, Kpi, px, toneClass, TradeTitle, useSubTrades, when, type BotFilter } from "./shared";
+import { AccountTabs, BotFilterTabs, duration, formatPercent, formatUsdt, Kpi, px, SUB_ASSET, toneClass, TradeTitle, useSubAccount, useSubTrades, when, type BotFilter } from "./shared";
 
 /** Owner 2026-11-06: the subscriber's closed trades — entry, exit, result, why it closed. */
 export default function SubHistory() {
   const q = useSubTrades("closed");
   const [bot, setBot] = useState<BotFilter>("all");
   const [period, setPeriod] = useState<PeriodId>("30d");
+  const [acc, setAcc, have] = useSubAccount(q.data?.trades);
+  const unit = SUB_ASSET[acc];
   const rows = useMemo(() => {
-    const all = (q.data?.trades ?? []).filter((t) => t.closedAt && (bot === "all" || t.source === bot));
+    const all = (q.data?.trades ?? []).filter((t) => t.closedAt && t.account === acc && (bot === "all" || t.source === bot));
     return inPeriod(all.map((t) => ({ ...t, closedAt: t.closedAt! })), period, Date.now());
-  }, [q.data, bot, period]);
+  }, [q.data, bot, period, acc]);
   const s = summarize(rows.map((t) => ({ id: String(t.id), symbol: t.symbol, patternId: t.pattern, closedAt: t.closedAt, pnlUsdt: t.pnl, roePercent: t.pnlPct })));
   return (
     <div className="mx-auto max-w-4xl space-y-4">
@@ -21,13 +23,14 @@ export default function SubHistory() {
               className={`min-h-10 px-2 text-xs font-bold sm:px-3 ${period === p.id ? "bg-primary text-primary-foreground" : "text-muted-foreground"}`}>{p.label}</button>
           ))}
         </div>
+        <AccountTabs value={acc} onChange={setAcc} have={have} />
         <BotFilterTabs value={bot} onChange={setBot} />
       </div>
       <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
-        <Kpi label="Результат" value={formatUsdt(s.counted ? s.netUsdt : null)} tone={s.counted ? s.netUsdt : null} />
+        <Kpi label="Результат" value={s.counted ? `${formatUsdt(s.netUsdt)} ${unit}` : "—"} tone={s.counted ? s.netUsdt : null} />
         <Kpi label="В плюс" value={s.winRate === null ? "—" : `${Math.round(s.winRate)}%`} hint={`${s.wins} из ${s.wins + s.losses}`} />
         <Kpi label="Сделок" value={String(s.trades)} />
-        <Kpi label="Средняя" value={formatUsdt(s.avgUsdt)} tone={s.avgUsdt} />
+        <Kpi label="Средняя" value={s.avgUsdt === null ? "—" : `${formatUsdt(s.avgUsdt)} ${unit}`} tone={s.avgUsdt} />
       </div>
       {q.isLoading && <div className="h-32 animate-pulse border border-border bg-card" />}
       {q.error && <p className="border border-destructive/40 p-4 text-sm text-destructive">Не удалось загрузить историю. Обновите страницу.</p>}
@@ -40,7 +43,7 @@ export default function SubHistory() {
             <div className="flex items-start justify-between gap-3">
               <TradeTitle t={t} />
               <div className="text-right">
-                <p className={`font-bold tabular ${toneClass(t.pnl)}`}>{formatUsdt(t.pnl)}</p>
+                <p className={`font-bold tabular ${toneClass(t.pnl)}`}>{formatUsdt(t.pnl)} <span className="text-xs font-normal">{unit}</span></p>
                 <p className={`text-xs tabular ${toneClass(t.pnlPct)}`}>{formatPercent(t.pnlPct, 2)}</p>
               </div>
             </div>

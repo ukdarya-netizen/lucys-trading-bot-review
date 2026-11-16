@@ -37,10 +37,22 @@ export type Status = {
   } | null;
   sync: Record<string, { at: string | null; ok: boolean | null; error: string | null }>;
   open: Trade[]; closed: Trade[]; skipped: Trade[];
-  totals: Array<{ accountId: string; source: string; sourceName: string; side: "long" | "short"; closed: number; wins: number; losses: number; liquidations: number; pnl: number; cancelled?: number; cancelledPnl?: number }>;
+  totals: Total[];
   skippedTotals: Array<{ source: string; sourceName: string; reason: string; reasonText: string; n: number }>;
 };
 type Events = { trade: Trade; events: Array<{ id: number; kind: string; detail: Record<string, unknown>; at: string }> };
+
+export type Total = { accountId: string; source: string; sourceName: string; side: "long" | "short"; day?: string | null; closed: number; wins: number; losses: number; liquidations: number; pnl: number; cancelled?: number; cancelledPnl?: number };
+
+/**
+ * Owner 2026-11-16 («VST — это VST, real — это USDT; конфузит с первого взгляда»): every amount carries the money
+ * of its own account. REAL — USDT, VST — VST (demo), PAPER — paper USDT. Accounts are never summed together.
+ */
+export const accountKind = (accountId: string): "REAL" | "VST" | "PAPER" =>
+  accountId.endsWith("-real") ? "REAL" : accountId === "owner-paper" ? "PAPER" : "VST";
+export const assetOfAccount = (accountId: string): string =>
+  ({ REAL: "USDT", VST: "VST", PAPER: "USDT (бумажные)" })[accountKind(accountId)];
+export const ACCOUNT_TEXT: Record<"REAL" | "VST" | "PAPER", string> = { REAL: "реальный счёт, USDT", VST: "демо-счёт VST", PAPER: "бумажная торговля, USDT" };
 
 export const ownerAccountOf = (d: Status) =>
   d.ownerAccount ?? d.accounts.find((account) => account.id === "owner-vst") ?? null;
@@ -157,19 +169,26 @@ export function SourcesStatus({ d }: { d: Status }) {
   );
 }
 
-/** Closed results by source and side (longs and shorts apart). */
-export function TotalsTable({ d, filter }: { d: Status; filter: SourceFilter }) {
-  const rows = bySource(d.totals, filter);
-  if (!rows.length) return <p className="text-sm text-muted-foreground">Закрытых сделок пока нет.</p>;
+/** Closed results by source and side (longs and shorts apart) of ONE account, summed over the given days. */
+export function TotalsTable({ rows: raw, asset }: { rows: Total[]; asset: string }) {
+  const m = new Map<string, Total>();
+  for (const t of raw) {
+    const k = `${t.source}|${t.side}`;
+    const x = m.get(k);
+    m.set(k, x ? { ...x, closed: x.closed + t.closed, wins: x.wins + t.wins, losses: x.losses + t.losses, liquidations: x.liquidations + t.liquidations,
+      pnl: x.pnl + t.pnl, cancelled: (x.cancelled ?? 0) + (t.cancelled ?? 0), cancelledPnl: (x.cancelledPnl ?? 0) + (t.cancelledPnl ?? 0) } : { ...t });
+  }
+  const rows = [...m.values()].sort((a, b) => a.source.localeCompare(b.source) || a.side.localeCompare(b.side));
+  if (!rows.length) return <p className="text-sm text-muted-foreground">Закрытых сделок за этот период нет.</p>;
   return (
     <div className="overflow-x-auto">
       <table className="w-full min-w-[640px] text-sm">
         <thead className="text-left text-[10px] uppercase text-muted-foreground">
-          <tr><th className="py-1 pr-3">Бот</th><th className="pr-3">Сторона</th><th className="pr-3">Сделок</th><th className="pr-3">В плюс</th><th className="pr-3">В минус</th><th className="pr-3">Доля плюсовых</th><th className="pr-3">Ликвидаций</th><th className="pr-3">Отмены источника</th><th className="pr-3">Результат</th></tr>
+          <tr><th className="py-1 pr-3">Бот</th><th className="pr-3">Сторона</th><th className="pr-3">Сделок</th><th className="pr-3">В плюс</th><th className="pr-3">В минус</th><th className="pr-3">Доля плюсовых</th><th className="pr-3">Ликвидаций</th><th className="pr-3">Отмены источника</th><th className="pr-3">Результат, {asset}</th></tr>
         </thead>
         <tbody>
           {rows.map((t) => (
-            <tr key={`${t.accountId}-${t.source}-${t.side}`} className="border-t border-border">
+            <tr key={`${t.source}-${t.side}`} className="border-t border-border">
               <td className="py-1.5 pr-3 font-bold">{t.sourceName}</td>
               <td className={`pr-3 font-bold ${sideCls(t.side)}`}>{sideText(t.side)}</td>
               <td className="pr-3 tabular">{t.closed}</td><td className="pr-3 tabular text-success">{t.wins}</td><td className="pr-3 tabular text-destructive">{t.losses}</td>
@@ -208,19 +227,19 @@ export function TradeTable({ rows, kind, empty }: { rows: Trade[]; kind: "open" 
                 <tr className="cursor-pointer border-t border-border hover:bg-muted/40" onClick={() => setOpenId(expanded ? null : t.id)}>
                   <td className="px-2 py-2">{expanded ? <ChevronDown className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}</td>
                   <td className="px-2"><b>{t.symbol.replace(/USDT$/, "")}</b> <span className={`text-xs font-bold ${sideCls(t.side)}`}>{sideText(t.side)}</span></td>
-                  <td className="px-2 text-xs">{t.sourceName}{t.pattern ? <span className="block text-muted-foreground">{t.pattern}</span> : null}
+                  <td className="px-2 text-xs">{t.sourceName}<span className="ml-1 border border-border px-1 text-[10px] font-bold">{accountKind(t.accountId)}</span>{t.pattern ? <span className="block text-muted-foreground">{t.pattern}</span> : null}
                     {t.mgmtLabel ? <span className="block max-w-[220px] text-muted-foreground" title={t.mgmtLabel}>{t.mgmt === "source" ? `ведёт ${BOT_BRAND_NAMES.nihilist}` : t.mgmtLabel}</span> : null}</td>
                   {kind === "open" && <>
                     <td className="px-2 text-xs tabular">{dt(t.openedAt ?? t.receivedAt)}</td>
                     <td className="px-2 text-xs tabular">{duration(t.openedAt, null)}</td>
                     <td className="px-2 tabular">{px(t.entryPrice)}</td>
                     <td className="px-2 tabular">{px(t.price)}</td>
-                    <td className={`px-2 font-bold tabular ${toneClass(t.unrealized)}`}>{formatUsdt(t.unrealized)}<span className="block text-xs font-normal">{pc(t.unrealizedPct)}</span></td>
+                    <td className={`px-2 font-bold tabular ${toneClass(t.unrealized)}`}>{formatUsdt(t.unrealized)} <span className="text-xs font-normal">{assetOfAccount(t.accountId)}</span><span className="block text-xs font-normal">{pc(t.unrealizedPct)}</span></td>
                     <td className="px-2 tabular">{px(t.stopPrice)}</td>
                     <td className="px-2 text-xs tabular">{toStop === null ? "—" : `${Math.abs(toStop).toFixed(2).replace(".", ",")}%`}</td>
                     <td className="px-2 tabular">{t.takePrice ? <>{px(t.takePrice)}<span className="block text-xs text-muted-foreground">+{t.takePct}%</span></> : <span className="text-xs text-muted-foreground">нет (выход по источнику)</span>}</td>
                     <td className="px-2 tabular">{px(t.liquidationPrice)}</td>
-                    <td className="px-2 tabular">{t.margin === null ? "—" : t.margin.toFixed(2).replace(".", ",")}{t.marginAdded > 0 && <span className="block text-xs text-muted-foreground">долито {t.marginAdded.toFixed(2).replace(".", ",")}</span>}</td>
+                    <td className="px-2 tabular">{t.margin === null ? "—" : `${t.margin.toFixed(2).replace(".", ",")} ${assetOfAccount(t.accountId)}`}{t.marginAdded > 0 && <span className="block text-xs text-muted-foreground">долито {t.marginAdded.toFixed(2).replace(".", ",")}</span>}</td>
                     <td className="px-2 text-xs">{t.statusText}</td>
                   </>}
                   {kind === "closed" && <>
@@ -230,7 +249,7 @@ export function TradeTable({ rows, kind, empty }: { rows: Trade[]; kind: "open" 
                     <td className="px-2 tabular">{px(t.entryPrice)}</td>
                     <td className="px-2 tabular">{px(t.exitPrice)}</td>
                     <td className={`px-2 tabular ${toneClass(t.pnlPct)}`}>{pc(t.pnlPct)}</td>
-                    <td className={`px-2 font-bold tabular ${toneClass(t.pnl)}`}>{formatUsdt(t.pnl)}</td>
+                    <td className={`px-2 font-bold tabular ${toneClass(t.pnl)}`}>{formatUsdt(t.pnl)} <span className="text-xs font-normal">{assetOfAccount(t.accountId)}</span></td>
                     <td className={`px-2 text-xs ${t.reason === "liquidation" ? "font-bold text-destructive" : ""}`}>{t.reasonText ?? "—"}</td>
                   </>}
                   {kind === "skipped" && <>
