@@ -67,3 +67,11 @@ test("stats: sum, drawdown, halves", () => {
   ], 1);
   assert.equal(s.sum, 0); assert.equal(s.maxDd, 5); assert.equal(s.open, 1); assert.equal(Math.round(s.stopPct), 67);
 });
+
+test("the bot's stop is the source's stop rounded away from the price, on the last price", async () => {
+  const { stopAt, TRIGGER_PRICE } = await import("./plan");
+  const c = { symbol: "BR-USDT", quantityPrecision: 0, pricePrecision: 4, minQty: 0, minNotional: 0 };
+  assert.equal(stopAt("long", 0.123456, c), "0.1234");
+  assert.equal(stopAt("short", 0.123446, c), "0.1235");
+  assert.equal(TRIGGER_PRICE, "CONTRACT_PRICE");
+});

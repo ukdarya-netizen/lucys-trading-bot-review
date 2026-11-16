@@ -45,6 +45,8 @@ export type Position = {
 export type Order = {
   orderId: string; clientOrderId: string | null; symbol: string; side: string; positionSide: string; type: string;
   status: string; qty: number; executedQty: number; avgPrice: number; stopPrice: number | null; time: number; updateTime: number;
+  /** Trigger price of a stop / take: MARK_PRICE, CONTRACT_PRICE (last price) or INDEX_PRICE; null when BingX gives none. */
+  workingType: string | null;
 };
 export type Priority = "entry" | "protect" | "normal";
 
@@ -102,6 +104,7 @@ function toOrder(o: any): Order {
     qty: num(o.origQty ?? o.quantity), executedQty: num(o.executedQty), avgPrice: num(o.avgPrice),
     stopPrice: Number.isFinite(num(o.stopPrice)) && num(o.stopPrice) > 0 ? num(o.stopPrice) : null,
     time: num(o.time), updateTime: num(o.updateTime ?? o.time),
+    workingType: o.workingType ? str(o.workingType) : null,
   };
 }
 

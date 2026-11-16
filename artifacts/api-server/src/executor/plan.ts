@@ -33,6 +33,16 @@ export function entryLimitPrice(side: Side, quote: { ask: number; bid: number },
     : decimalAt(quote.bid * (1 - ENTRY_SLIPPAGE), c.pricePrecision, "floor");
 }
 
+/**
+ * Owner 2026-11-16 (BR: the bot's stop fired, Nihilist's was 1 % away): stops and takes trigger on BingX's LAST
+ * price (CONTRACT_PRICE) — the price CAB, Nihilist and Bitcoin MM follow their trades by — not the mark price.
+ */
+export const TRIGGER_PRICE = "CONTRACT_PRICE";
+/** The source's stop on BingX's price step, rounded away from the price: never hit before the source's own stop. */
+export function stopAt(side: Side, stop: number, c: Contract): string {
+  return decimalAt(stop, c.pricePrecision, side === "long" ? "floor" : "ceil");
+}
+
 /** The stop must be on the loss side of the price. */
 export function stopValid(side: Side, stop: number, price: number): boolean {
   return side === "long" ? stop < price : stop > price;

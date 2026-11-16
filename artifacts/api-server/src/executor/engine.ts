@@ -22,7 +22,7 @@ import { BingXError, decimalAt, exSymbol, type BingX, type Order, type Position 
 import { LEVERAGE, marginFor, type Account } from "./accounts";
 import {
   SIGNAL_TTL_MS, closeSide, entryLimitPrice, entryQuantity, liquidationSafe, manageStep, movePct, nihilistStrategy, openSide, pnl, posSide, stopValid,
-  takeFor, takePrice, topUpAmount, type Side,
+  stopAt, takeFor, takePrice, topUpAmount, TRIGGER_PRICE, type Side,
 } from "./plan";
 import {
   activeTrades, commandsForSignal, createTrade, event, getSourceSettings, symbolBusy, tradeById, tradesForSignal, updateTrade,
@@ -595,7 +595,7 @@ export function createExecutor(deps: {
       const params = {
         symbol: exSymbol(sig.symbol), side: openSide(sig.side), positionSide: posSide(sig.side), type: "LIMIT", timeInForce: "IOC",
         price: entryLimitPrice(sig.side, q, c), quantity: size.qty, clientOrderId: cid,
-        stopLoss: JSON.stringify({ type: "STOP_MARKET", stopPrice: Number(decimalAt(sig.stop, c.pricePrecision)), workingType: "MARK_PRICE" }),
+        stopLoss: JSON.stringify({ type: "STOP_MARKET", stopPrice: Number(stopAt(sig.side, sig.stop, c)), workingType: TRIGGER_PRICE }),
       };
       let order: Order | null = null;
       // Recheck after exchange preparation; a pause also stops work queued before the click.
@@ -751,13 +751,25 @@ export function createExecutor(deps: {
     const c = await rt.ex.contract(t.symbol, "protect");
     return rt.ex.placeOrder({
       symbol: exSymbol(t.symbol), side: closeSide(t.side), positionSide: posSide(t.side), type: "STOP_MARKET",
-      quantity: decimalAt(qty, c.quantityPrecision, "floor"), stopPrice: decimalAt(stop, c.pricePrecision), workingType: "MARK_PRICE",
+      quantity: decimalAt(qty, c.quantityPrecision, "floor"), stopPrice: stopAt(t.side, stop, c), workingType: TRIGGER_PRICE,
     }, "protect");
   }
 
   async function ensureStop(rt: Runtime, t: Trade, pos: Position): Promise<void> {
     const { stops } = await protectiveOrders(rt, t);
-    if (stops.length) return;
+    if (stops.length) {
+      // Owner 2026-11-16: the stop on BingX is the source's stop, on the last price. A stop on the mark price
+      // (placed before) or at another level is replaced: the new one first, never a moment without a stop.
+      const c = await rt.ex.contract(t.symbol, "protect");
+      const want = Number(stopAt(t.side, t.stop_price!, c));
+      const tick = 10 ** -c.pricePrecision;
+      const synced = stops.every((o) => o.workingType !== "MARK_PRICE" && o.workingType !== "INDEX_PRICE" && o.stopPrice !== null && Math.abs(o.stopPrice - want) < tick / 2);
+      if (synced) return;
+      await placeStop(rt, t, pos.qty, t.stop_price!);
+      for (const o of stops) await rt.ex.cancelOrder(t.symbol, o.orderId);
+      await event(rt.acct.id, t, "stop_resynced", { stop: want, was: stops.map((o) => ({ stop: o.stopPrice, trigger: o.workingType })) });
+      return;
+    }
     const q = await rt.ex.ticker(t.symbol, "protect");
     const price = t.side === "long" ? q.bid : q.ask;
     // The stop is already passed: close at market, named like a fill of that stop.
@@ -769,12 +781,14 @@ export function createExecutor(deps: {
   async function ensureTake(rt: Runtime, t: Trade, pos: Position): Promise<void> {
     if (!t.take_pct || !t.entry_price) return;
     const { takes } = await protectiveOrders(rt, t);
-    if (takes.length) return;
+    // Owner 2026-11-16: a take on the mark price (placed before) is replaced by one on the last price.
+    if (takes.length && takes.every((o) => o.workingType !== "MARK_PRICE" && o.workingType !== "INDEX_PRICE")) return;
     const c = await rt.ex.contract(t.symbol, "protect");
     const tp = takePrice(t.side, t.entry_price, t.take_pct, c);
+    for (const o of takes) await rt.ex.cancelOrder(t.symbol, o.orderId);
     await rt.ex.placeOrder({
       symbol: exSymbol(t.symbol), side: closeSide(t.side), positionSide: posSide(t.side), type: "TAKE_PROFIT_MARKET",
-      quantity: decimalAt(pos.qty, c.quantityPrecision, "floor"), stopPrice: tp, workingType: "MARK_PRICE",
+      quantity: decimalAt(pos.qty, c.quantityPrecision, "floor"), stopPrice: tp, workingType: TRIGGER_PRICE,
     }, "protect");
     await updateTrade(t.id, { take_price: Number(tp) });
   }
