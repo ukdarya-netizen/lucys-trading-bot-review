@@ -17,11 +17,14 @@ import { MainAccountToggles } from "@/components/SourceToggles";
 // Owner 2026-11-03: the trading bot has two signal sources (CAB and Nihilist); the main pages
 // show both with one switch. The old bot's pages are gone from the site (owner: not needed).
 const NAV_ITEMS = [
-  { group: "Торговля", href: "/journal/overview", label: "Обзор", short: "Обзор", sub: "результат Crypto Alts Bullet и Nihilyst Crypto Trading", icon: LayoutDashboard },
-  { group: "Торговля", href: "/journal/signals", label: "Сигналы", short: "Сигналы", sub: "что пришло и что сделал бот", icon: Activity },
+  // Owner 2026-11-17 («не дублировать, логично и понятно»): two questions, two pages — «Стратегии» (what each
+  // strategy gives on every signal, to choose; the start page) and «Мой результат» (what the bot really did on the
+  // accounts). Then the trades themselves, then settings.
+  { group: "Торговля", href: "/journal/bots", label: "Стратегии", short: "Стратегии", sub: "сколько даёт каждая стратегия — для выбора", icon: SlidersHorizontal },
+  { group: "Торговля", href: "/journal/overview", label: "Мой результат", short: "Результат", sub: "что бот реально сделал на счетах", icon: LayoutDashboard },
   { group: "Торговля", href: "/journal/positions", label: "Позиции", short: "Позиции", sub: "открытые сейчас", icon: Crosshair },
   { group: "Торговля", href: "/journal/trades", label: "История", short: "История", sub: "закрытые и не открытые", icon: History },
-  { group: "Управление", href: "/journal/bots", label: "Crypto Alts Bullet · Nihilyst Crypto Trading · Bitcoin Margin Master", short: "Боты", sub: "результаты стратегий", icon: SlidersHorizontal },
+  { group: "Торговля", href: "/journal/signals", label: "Сигналы", short: "Сигналы", sub: "приходят ли и что сделал бот", icon: Activity },
   { group: "Управление", href: "/journal/my-bot", label: "Мой кабинет", short: "Кабинет", sub: "торговля, стратегия, BTC", icon: UserRound },
   { group: "Управление", href: "/journal/health", label: "Bot Health", short: "Health", sub: "работает ли бот, ошибки", icon: HeartPulse },
   { group: "Люди", href: "/journal/subscribers", label: "Подписчики", short: "Подписчики", sub: "заявки, сроки, боты", icon: Users },
@@ -164,7 +167,7 @@ export default function JournalLayout() {
              <Route path="/journal/health" component={BotHealth} />
              <Route path="/journal/subscribers" component={JournalSubscribers} />
              <Route path="/journal/my-bot">{() => <div className="mx-auto max-w-3xl space-y-4"><MainAccountToggles /></div>}</Route>
-             <Route><Redirect to="/journal/overview" /></Route>
+             <Route><Redirect to="/journal/bots" /></Route>
           </Switch>
         </div>
          <nav aria-label="Разделы дневника" className="cyber-mobile-nav md:hidden fixed inset-x-0 bottom-0 z-20 flex overflow-x-auto border-t border-border pb-[env(safe-area-inset-bottom)]">

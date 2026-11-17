@@ -5,7 +5,7 @@ import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "@/lib/subscriber-api";
 import { BotBrand, BOT_BRAND_NAMES } from "@/components/BotBrand";
-import { SourceSwitch, useSourceFilter, px, sideCls, sideText } from "@/components/executor-ui";
+import { SourceSwitch, SourcesStatus, useExecutor, useSourceFilter, px, sideCls, sideText } from "@/components/executor-ui";
 import { formatUsdt, toneClass } from "@/lib/performance";
 
 type SignalRow = {
@@ -23,11 +23,14 @@ const DAYS: Array<[number, string]> = [[1, "сутки"], [3, "3 дня"], [7, "
 export default function SignalsPage() {
   const [days, setDays] = useState(3);
   const [filter, setFilter] = useSourceFilter();
+  // Owner 2026-11-17: whether signals arrive is on this page (moved from the overview).
+  const ex = useExecutor();
   const q = useQuery({ queryKey: ["executor-signals", days], queryFn: () => api<{ signals: SignalRow[] }>(`/journal/executor/signals?days=${days}`), refetchInterval: 15_000 });
   const rows = (q.data?.signals ?? []).filter((s) => filter === "all" || s.source === filter);
   const traded = rows.filter((s) => s.trades.length).length;
   return (
     <div className="mx-auto max-w-7xl space-y-4">
+      {ex.data && <SourcesStatus d={ex.data} />}
       <div className="flex flex-wrap items-center gap-3">
         <SourceSwitch value={filter} onChange={setFilter} />
         <div className="inline-grid grid-cols-3 border border-border">

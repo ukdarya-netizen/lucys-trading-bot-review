@@ -1,11 +1,11 @@
 // Обзор торгового бота (owner 2026-11-03): all signal sources at a glance — or one of them.
 import { useMemo, useState, type ReactNode } from "react";
-import { Crosshair, Percent, ShieldAlert, TrendingUp, Wallet } from "lucide-react";
+import { Crosshair, ShieldAlert, Wallet } from "lucide-react";
 import { CartesianGrid, Line, LineChart, ReferenceLine, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import { formatUsdt, toneClass } from "@/lib/performance";
 import { BOT_BRAND_NAMES } from "@/components/BotBrand";
 import {
-  ACCOUNT_TEXT, LoadingOrError, OwnerAccountNotice, SourceSwitch, SourcesStatus, TotalsTable, accountKind, assetOfAccount, bySource, useExecutor, useSourceFilter,
+  ACCOUNT_TEXT, LoadingOrError, OwnerAccountNotice, SourceSwitch, TotalsTable, accountKind, assetOfAccount, bySource, useExecutor, useSourceFilter,
 } from "@/components/executor-ui";
 
 function Kpi({ label, value, hint, tone, icon }: { label: string; value: string; hint?: string; tone?: string; icon?: ReactNode }) {
@@ -131,6 +131,10 @@ export default function TradeOverview() {
           ))}
         </div>
       </div>
+      <p className="border-l-4 border-primary bg-card p-3 text-sm">
+        <b>Мой результат</b> — что бот реально сделал на ваших счетах. Бот открывает не каждый сигнал, поэтому цифры отличаются от «Стратегий».
+        REAL — реальные деньги (USDT), VST — демо-деньги BingX, PAPER — бумажная торговля внутри бота (USDT, без биржи). Счета не складываются — сравнивайте проценты.
+      </p>
       <p className="text-xs text-muted-foreground">
         Счёт <b className="text-foreground">{kind}</b> ({ACCOUNT_TEXT[kind]}) · {name} · период <b className="text-foreground">{span}</b>. Все суммы — в {asset}; счета не складываются.
       </p>
@@ -150,15 +154,11 @@ export default function TradeOverview() {
         <p className="mt-2 text-xs text-muted-foreground">Счета разного размера и в разных деньгах — сравнивайте проценты. Процент — закрытые сделки за период к депозиту на начало периода; пополнения и выводы не учитываются. Нажмите на счёт — ниже подробности по нему.</p>
       </section>
 
-      <section className="grid grid-cols-2 gap-3 lg:grid-cols-6">
-        <div className="col-span-2 lg:col-span-3"><Kpi icon={<Wallet className="h-5 w-5" />} label={`Баланс счёта ${kind}`} value={bal ? `${num2(bal.equity)} ${asset}` : "—"} hint={bal ? `свободно ${num2(bal.available)} ${asset} · сейчас` : "баланс этого счёта сейчас не прочитан"} /></div>
-        <div className="col-span-2 lg:col-span-3"><Kpi icon={<TrendingUp className="h-5 w-5" />} label={`Результат закрытых · ${span}`} value={`${formatUsdt(pnl)} ${asset}`} tone={toneClass(n ? pnl : null)} hint={`${n} сделок${cancelled ? ` · из них отмены источника: ${cancelled} (${formatUsdt(cancelledPnl)} ${asset})` : ""}`} /></div>
-        <div className="lg:col-span-2"><Kpi icon={<Percent className="h-5 w-5" />} label={`Доля плюсовых · ${span}`} value={counted > 0 ? `${Math.round((wins / counted) * 100)}%` : "—"} hint={counted > 0 ? `${wins} из ${counted} закрытых${cancelled ? " · отмены не считаются" : ""}` : "сделок за период нет"} /></div>
-        <div className="lg:col-span-2"><Kpi icon={<Crosshair className="h-5 w-5" />} label="Открыто сейчас" value={String(open.length)} tone={toneClass(open.length ? floating : null)} hint={open.length ? `результат открытых позиций: ${formatUsdt(floating)} ${asset}` : "открытых позиций нет"} /></div>
-        <div className="lg:col-span-2"><Kpi icon={<ShieldAlert className="h-5 w-5" />} label={`Ликвидаций · ${span}`} value={String(liq)} tone={liq ? "text-destructive" : ""} hint={liq ? "нужно разобрать" : "ни одной"} /></div>
+      <section className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+        <Kpi icon={<Wallet className="h-5 w-5" />} label={`Баланс счёта ${kind}`} value={bal ? `${num2(bal.equity)} ${asset}` : "—"} hint={bal ? `свободно ${num2(bal.available)} ${asset} · сейчас` : "баланс этого счёта сейчас не прочитан"} />
+        <Kpi icon={<Crosshair className="h-5 w-5" />} label={`Открыто сейчас · ${kind}`} value={String(open.length)} tone={toneClass(open.length ? floating : null)} hint={open.length ? `результат открытых позиций: ${formatUsdt(floating)} ${asset}` : "открытых позиций нет"} />
+        <Kpi icon={<ShieldAlert className="h-5 w-5" />} label={`Ликвидаций · ${kind} · ${span}`} value={String(liq)} tone={liq ? "text-destructive" : ""} hint={liq ? "нужно разобрать" : "ни одной"} />
       </section>
-
-      <SourcesStatus d={d} />
 
       <section className="border border-border bg-card p-4">
         <h2 className="mb-2 text-sm font-bold">Накопленный результат закрытых сделок по дням · {kind} · {name} · {span}, {asset}</h2>

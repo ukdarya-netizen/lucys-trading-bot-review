@@ -36,9 +36,10 @@ export default function StrategiesPage() {
       {!d ? <LoadingOrError q={ex} /> : (
         <>
           {!d.enabled && <p className="border border-destructive/50 bg-destructive/10 p-3 text-sm text-destructive">Торговый бот выключен: в Secrets нет EXECUTOR_V2=1.</p>}
-          <p className="text-sm text-muted-foreground">
-            Здесь только результаты стратегий. Выбрать стратегию, включить торговлю, размер и плечо —{" "}
-            <Link href="/journal/my-bot" className="text-primary underline">в «Мой кабинет»</Link>.
+          <p className="border-l-4 border-primary bg-card p-3 text-sm">
+            <b>Стратегии</b> — сколько дала бы каждая стратегия на всех сигналах бота, при вашем размере сделки. Это для выбора.
+            Что бот реально сделал на вашем счёте — в <Link href="/journal/overview" className="text-primary underline">«Мой результат»</Link>: там цифры другие, потому что бот открывает не каждый сигнал.
+            Выбрать стратегию, размер и включить торговлю — в <Link href="/journal/my-bot" className="text-primary underline">«Мой кабинет»</Link>.
           </p>
           {tab === "cab" ? <CabStrategies d={d} /> : tab === "nihilist" ? <NihilistStrategies d={d} /> : <BtcMmReport families={d.btc.families} />}
         </>

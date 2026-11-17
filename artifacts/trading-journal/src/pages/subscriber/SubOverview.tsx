@@ -27,6 +27,10 @@ export default function SubOverview() {
   const state = subscription ? runtimeText(subscription) : null;
   return (
     <div className="mx-auto max-w-4xl space-y-4">
+      <p className="border-l-4 border-primary bg-card p-3 text-sm">
+        <b>Мой результат</b> — что бот реально сделал на вашем счёте. Бот открывает не каждый сигнал, поэтому цифры отличаются от{" "}
+        <Link href="/journal/bots" className="text-primary underline">«Стратегий»</Link> — там результат каждой стратегии на всех сигналах, для выбора.
+      </p>
       {subscription && state && (
         <section className={`border p-4 ${state.tone === "ok" ? "border-success/40" : state.tone === "bad" ? "border-destructive/50" : "border-border"} bg-card`}>
           <p className={`text-sm font-bold ${state.tone === "ok" ? "text-success" : state.tone === "bad" ? "text-destructive" : ""}`}>{state.text}</p>

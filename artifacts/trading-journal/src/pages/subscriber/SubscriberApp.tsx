@@ -15,10 +15,11 @@ import SubBots from "./SubBots";
 import { useSubscription } from "./shared";
 
 const SUB_NAV = [
-  { href: "/journal/overview", label: "Обзор", sub: "мой результат и статус бота", icon: LayoutDashboard },
+  // Owner 2026-11-17: «Стратегии» (to choose, the start page) and «Мой результат» (what the bot did on my account).
+  { href: "/journal/bots", label: "Стратегии", sub: "сколько даёт каждая стратегия — для выбора", icon: SlidersHorizontal },
+  { href: "/journal/overview", label: "Мой результат", sub: "что бот реально сделал на моём счёте", icon: LayoutDashboard },
   { href: "/journal/positions", label: "Позиции", sub: "открытые сейчас", icon: Crosshair },
   { href: "/journal/trades", label: "История", sub: "закрытые сделки", icon: History },
-  { href: "/journal/bots", label: "Боты", sub: "результаты CAB и Нигилиста", icon: SlidersHorizontal },
   { href: "/journal/my-bot", label: "Кабинет", sub: "ключ, боты, размер, вкл/выкл", icon: UserRound },
 ] as const;
 
@@ -87,7 +88,7 @@ export default function SubscriberApp() {
             <Route path="/journal/trades" component={SubHistory} />
             <Route path="/journal/bots" component={SubBots} />
             <Route path="/journal/my-bot">{() => <SubscriberCabinetBody inApp />}</Route>
-            <Route><Redirect to="/journal/overview" /></Route>
+            <Route><Redirect to="/journal/bots" /></Route>
           </Switch>
         </div>
         <nav aria-label="Разделы" className="cyber-mobile-nav md:hidden fixed inset-x-0 bottom-0 z-20 flex border-t border-border pb-[env(safe-area-inset-bottom)]">

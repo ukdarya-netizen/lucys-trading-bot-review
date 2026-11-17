@@ -6,7 +6,7 @@ export default function HomeRedirect() {
   return (
     <>
       <Show when="signed-in">
-        <Redirect to="/journal/overview" />
+        <Redirect to="/journal/bots" />
       </Show>
       <Show when="signed-out">
         <Landing />

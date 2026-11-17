@@ -394,53 +394,6 @@ function TradingStep({ sub, onChanged }: { sub: Subscription; onChanged: () => v
 }
 
 /** The person's results in the trading bot, by signal source (owner 2026-11-03). */
-function Results() {
-  const q = useQuery({
-    queryKey: ["me-results"],
-    queryFn: () => api<{ trades: Array<{ source: string; symbol: string; side: string; status: string; closeText: string | null; pnl: number | null; pnlPct: number | null; closedAt: string | null }> }>("/me/results"),
-    refetchInterval: 30_000,
-  });
-  const [src, setSrc] = useState<"all" | BotSource>("all");
-  const all = q.data?.trades ?? [];
-  const trades = src === "all" ? all : all.filter((t) => t.source === src);
-  const closed = trades.filter((t) => t.status === "closed" && t.pnl !== null);
-  const net = closed.reduce((x, t) => x + (t.pnl ?? 0), 0);
-  const wins = closed.filter((t) => (t.pnl ?? 0) > 0).length;
-  const open = trades.filter((t) => t.status !== "closed").length;
-  return (
-    <section className="border border-border bg-card p-5">
-      <div className="mb-4 flex flex-wrap items-center justify-between gap-2">
-        <h2 className="text-base font-bold">Мои результаты</h2>
-        <div className="inline-grid grid-cols-4 border border-border">
-          {(["all", ...BOT_SOURCES] as const).map((id) => (
-            <button key={id} type="button" aria-label={id === "all" ? "Все боты" : BOT_BRAND_NAMES[id]} aria-pressed={src === id} onClick={() => setSrc(id)}
-              className={`min-h-10 min-w-0 px-2 text-xs font-bold sm:px-3 ${src === id ? "bg-primary text-primary-foreground" : "text-muted-foreground"}`}>
-              {id === "all" ? "Все" : <BotBrand source={id} size="xs" />}
-            </button>
-          ))}
-        </div>
-      </div>
-      <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
-        <div><p className="text-[11px] uppercase text-muted-foreground">Результат</p><p className={`mt-1 text-2xl font-bold tabular ${toneClass(closed.length ? net : null)}`}>{closed.length ? formatUsdt(net) : "—"}</p></div>
-        <div><p className="text-[11px] uppercase text-muted-foreground">В плюс</p><p className="mt-1 text-2xl font-bold tabular">{closed.length ? `${Math.round((wins / closed.length) * 100)}%` : "—"}</p></div>
-        <div><p className="text-[11px] uppercase text-muted-foreground">Закрыто</p><p className="mt-1 text-2xl font-bold tabular">{closed.length}</p></div>
-        <div><p className="text-[11px] uppercase text-muted-foreground">Открыто</p><p className="mt-1 text-2xl font-bold tabular">{open}</p></div>
-      </div>
-      {closed.length > 0 && (
-        <ul className="mt-4 border border-border">
-          {closed.slice(0, 10).map((t, i) => (
-            <li key={i} className="flex justify-between gap-3 border-t border-border/70 px-3 py-2 text-sm first:border-t-0">
-              <span className="truncate"><b>{t.symbol.replace(/USDT$/, "")}</b> <span className={t.side === "long" ? "text-success" : "text-destructive"}>{t.side === "long" ? "лонг" : "шорт"}</span>
-                <span className="text-muted-foreground"> · {BOT_BRAND_NAMES[(t.source === "nihilist" || t.source === "btc" ? t.source : "cab") as BotSource]} · {t.closeText ?? ""}</span></span>
-              <span className={`font-bold tabular ${toneClass(t.pnl)}`}>{formatUsdt(t.pnl)}</span>
-            </li>
-          ))}
-        </ul>
-      )}
-    </section>
-  );
-}
-
 /**
  * The cabinet itself (key, strategy, size, start/stop, results). `embedded`
  * renders it inside the owner's journal ("Мой кабинет") without the
@@ -493,7 +446,7 @@ export function SubscriberCabinetBody({ embedded = false, inApp = false }: { emb
       <StrategyStep sub={sub} choices={strategyChoices} onChanged={refresh} />
       <SizeStep key={`${sub.tradingAccount}:${JSON.stringify(sub.positionSettings)}`} sub={sub} choices={positionChoices} onChanged={refresh} />
       <TradingStep sub={sub} onChanged={refresh} />
-      {!inApp && <Results />}
+      {/* Owner 2026-11-17: results live in «Мой результат» only (one account at a time, with its money) — not repeated here. */}
       <p className="flex items-center gap-2 text-xs text-muted-foreground"><KeyRound className="h-3.5 w-3.5" />Ключ хранится зашифрованным и никому не показывается, включая владельца.</p>
     </Wrap>
   );
