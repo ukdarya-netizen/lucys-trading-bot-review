@@ -129,6 +129,7 @@ export function closeLine(key: string, ctx: { source: string; takePct?: number |
     case "take_partial": return "Частичная фиксация прибыли";
     case "liquidation": return "ЛИКВИДАЦИЯ позиции";
     case "manual": return "Закрыта вручную на бирже";
+    case "closed_unknown": return "Позиция закрыта на бирже — BingX не сообщил, каким ордером";
     case "source": return `${src} закрыл сделку — закрыта по рынку`;
     case "source_sync": return `${src} уже закрыл сделку (найдено при сверке) — закрыта по рынку`;
     case "timeout": return "Истёк срок удержания — закрыта по рынку";

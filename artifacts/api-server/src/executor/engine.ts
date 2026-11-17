@@ -862,25 +862,46 @@ export function createExecutor(deps: {
     const histError = histFail.error;
     const closing = hist.filter((o) => o.positionSide === posSide(t.side) && o.side === closeSide(t.side) && o.executedQty > 0 && o.avgPrice > 0)
       .sort((a, b) => a.updateTime - b.updateTime);
-    if (!closing.length && now() - t.updated_at.getTime() < 60_000) return; // history can lag: next pass
+    // Owner 2026-11-17 (AGT take, HANA stops booked «закрыта вручную, биржа не вернула цену»): with no closing order
+    // in the order history, BingX's position history gives the close price; the reason then comes from the price
+    // against the trade's own stop / take. «Вручную» only for a market close the bot did not send. Up to 10 minutes
+    // of waiting for either before a close is booked without a price.
+    let posClose: { closePrice: number; closedAt: number; realised: number | null } | null = null;
+    if (!closing.length) {
+      const ph = await rt.ex.closedPositions(t.symbol, since, "normal").catch(() => []);
+      posClose = ph.filter((x) => x.positionSide === posSide(t.side)).sort((a, b) => b.closedAt - a.closedAt)[0] ?? null;
+      if (!posClose && now() - t.updated_at.getTime() < 600_000) return; // both histories can lag: next pass
+    }
     if (histError) await event(rt.acct.id, t, "history_unavailable", { message: histError });
     const qty = closing.reduce((s, o) => s + o.executedQty, 0);
-    const exit = qty > 0 ? closing.reduce((s, o) => s + o.avgPrice * o.executedQty, 0) / qty : null;
+    const exit = qty > 0 ? closing.reduce((s, o) => s + o.avgPrice * o.executedQty, 0) / qty : posClose?.closePrice ?? null;
     const last = closing[closing.length - 1];
     const type = (last?.type ?? "").toUpperCase();
     const entry = t.entry_price ?? exit ?? 0;
     // Named from what really happened: the order that closed it, why the stop stood there, the real exit.
-    const lastPct = last && entry ? movePct(t.side, entry, last.avgPrice) : null;
+    const lastPrice = last?.avgPrice ?? exit;
+    const lastPct = lastPrice !== null && entry ? movePct(t.side, entry, lastPrice) : null;
+    const byPrice = (): string | null => {
+      if (lastPrice === null || !entry) return null;
+      const d = t.side === "long" ? 1 : -1;
+      if (t.stop_price !== null && d * (lastPrice - t.stop_price) <= Math.abs(t.stop_price) * 0.004) return stopCloseKey((t.stop_kind ?? "initial") as StopKind, lastPct);
+      if (t.take_pct && lastPct !== null && lastPct >= t.take_pct - 0.4) return "take";
+      return null;
+    };
     const reason = type.includes("LIQ") ? "liquidation"
       : type.startsWith("TAKE_PROFIT") ? "take"
         : type.startsWith("STOP") || t.pending_close_reason === "stop_market" ? stopCloseKey((t.stop_kind ?? "initial") as StopKind, lastPct)
-          : t.pending_close_reason ?? "manual";
-    const result = exit !== null ? closing.reduce((s, o) => s + pnl(t.side, entry, o.avgPrice, o.executedQty), 0) : null;
+          : t.pending_close_reason ?? (last ? "manual" : byPrice() ?? "closed_unknown");
+    const result = closing.length ? closing.reduce((s, o) => s + pnl(t.side, entry, o.avgPrice, o.executedQty), 0)
+      : posClose ? (posClose.realised ?? (exit !== null && t.qty ? pnl(t.side, entry, exit, t.qty) : null)) : null;
     // Leftover protective orders of this side.
     const open = await rt.ex.openOrders(t.symbol, "normal").catch(() => [] as Order[]);
     for (const o of open.filter((o) => o.positionSide === posSide(t.side))) await rt.ex.cancelOrder(t.symbol, o.orderId);
+    // Owner 2026-11-17 (HANA came twice): only the pass that really closes the trade books it and reports it.
+    const claimed = await pool.query("UPDATE ex_trades SET status = 'closed', updated_at = now() WHERE id = $1 AND status <> 'closed' RETURNING id", [t.id]);
+    if (!claimed.rowCount) return;
     const cur = await updateTrade(t.id, {
-      status: "closed", closed_at: new Date(last?.updateTime || now()), exit_price: exit, pnl: result,
+      status: "closed", closed_at: new Date(last?.updateTime || posClose?.closedAt || now()), exit_price: exit, pnl: result,
       pnl_pct: exit !== null && entry ? movePct(t.side, entry, exit) : null, close_reason: reason,
     });
     await event(rt.acct.id, cur, "closed", { reason, exit, pnl: result });
@@ -889,7 +910,7 @@ export function createExecutor(deps: {
       `${head(rt, cur)} · ${cur.side === "long" ? "лонг" : "шорт"}`,
       `Позиция закрыта. ${closeLine(reason, { source: cur.source, takePct: cur.take_pct })}.`,
       `Сверка BingX подтверждена: позиции нет; запись убрана из «Открытых» (обновление в кабинете — до 15 секунд).`,
-      `Вход ${fmt(cur.entry_price)} → выход ${fmt(last?.avgPrice ?? exit)}${closing.length > 1 ? ` (средний выход по всем частям ${fmt(exit)})` : ""}`,
+      `Вход ${fmt(cur.entry_price)} → выход ${fmt(last?.avgPrice ?? exit)}${closing.length > 1 ? ` (средний выход по всем частям ${fmt(exit)})` : ""}${!closing.length && posClose ? " (по истории позиций BingX)" : ""}`,
       resultLine(cur.pnl_pct, result, asset) + (cur.partial_done || closing.length > 1 ? " — с учётом частичных закрытий" : ""),
       histError ? `Цену выхода BingX не отдал (${histError}) — результат не посчитан, сверьте на бирже.` : "",
     ].filter(Boolean).join("\n"));

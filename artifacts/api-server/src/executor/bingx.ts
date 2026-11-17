@@ -486,11 +486,26 @@ export function createBingX(opts: { env: Env; key: string; secret: string; fetch
     const list = Array.isArray(d) ? d : d?.orders ?? [];
     return list.map(toOrder);
   }
+  /**
+   * Owner 2026-11-17 (AGT / HANA booked «закрыта вручную, биржа не вернула цену»): the closed positions of a symbol
+   * from BingX's position history — the average close price and the realised result, when the order history has none.
+   */
+  async function closedPositions(symbol: string, sinceMs: number, p: Priority = "normal"): Promise<Array<{ positionSide: string; closePrice: number; closedAt: number; realised: number | null; qty: number }>> {
+    const d = await call(p, "GET", "/openApi/swap/v1/trade/positionHistory", { symbol: exSymbol(symbol), startTs: sinceMs, endTs: now(), pageIndex: 1, pageSize: 50 });
+    const list = Array.isArray(d) ? d : d?.positionHistory ?? d?.list ?? [];
+    return (list as Array<Record<string, unknown>>).map((x) => ({
+      positionSide: String(x.positionSide ?? ""),
+      closePrice: Number(x.avgClosePrice ?? x.closePrice ?? 0),
+      closedAt: Number(x.updateTime ?? x.closeTime ?? 0),
+      realised: x.netProfit !== undefined ? Number(x.netProfit) : x.realisedProfit !== undefined ? Number(x.realisedProfit) : null,
+      qty: Math.abs(Number(x.closePositionAmt ?? x.positionAmt ?? 0)),
+    })).filter((x) => x.closePrice > 0 && x.closedAt >= sinceMs);
+  }
   async function addMargin(symbol: string, side: "LONG" | "SHORT", amount: string, p: Priority = "protect"): Promise<void> {
     await call(p, "POST", "/openApi/swap/v2/trade/positionMargin", { symbol: exSymbol(symbol), amount, type: 1, positionSide: side });
   }
 
-  return { env: opts.env, stats, contract, resolveSymbol, ticker, balance, positions, ensureHedgeMode, ensureIsolated, maxPositionValue, placeOrder, queryOrder, openOrders, prefetchOpenOrders, cancelOrder, history, addMargin };
+  return { env: opts.env, stats, contract, resolveSymbol, ticker, balance, positions, ensureHedgeMode, ensureIsolated, maxPositionValue, placeOrder, queryOrder, openOrders, prefetchOpenOrders, cancelOrder, history, closedPositions, addMargin };
 }
 
 export type BingX = ReturnType<typeof createBingX>;
