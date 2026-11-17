@@ -845,17 +845,22 @@ export function createExecutor(deps: {
   }
 
   /** Books a position that is gone from the exchange: real exit from the fills. */
+  const goneSince = new Map<number, number>();
   async function finalize(rt: Runtime, t: Trade): Promise<void> {
     if (t.status === "closed") return;
     const pos = await findPosition(rt, t, "normal");
-    if (pos) return; // still open
+    if (pos) { goneSince.delete(t.id); return; } // still open
+    // Owner 2026-11-17 (AGT, HANA): the wait for BingX's histories counts from the moment the position was first
+    // seen gone — not from the trade's last update (hours earlier), which booked them at once as «вручную».
+    if (!goneSince.has(t.id)) goneSince.set(t.id, now());
+    const waited = now() - goneSince.get(t.id)!;
     const since = (t.opened_at ?? t.entry_sent_at ?? t.received_at).getTime() - 1_000;
     // Owner 2026-11-06 (a position closed by hand stayed "open"): when BingX keeps refusing the order
     // history while the position is gone, the trade is booked closed after 3 minutes without the exit price,
     // instead of hanging open forever and blocking the account.
     const histFail: { error: string | null } = { error: null };
     const hist = await rt.ex.history(t.symbol, since, "normal").catch((e) => {
-      if (now() - t.updated_at.getTime() < 180_000) throw e;
+      if (waited < 180_000) throw e;
       histFail.error = errText(e);
       return [] as Order[];
     });
@@ -868,9 +873,9 @@ export function createExecutor(deps: {
     // of waiting for either before a close is booked without a price.
     let posClose: { closePrice: number; closedAt: number; realised: number | null } | null = null;
     if (!closing.length) {
-      const ph = await rt.ex.closedPositions(t.symbol, since, "normal").catch(() => []);
+      const ph = await rt.ex.closedPositions(t.symbol, since, "normal").catch(() => [] as Awaited<ReturnType<BingX["closedPositions"]>>);
       posClose = ph.filter((x) => x.positionSide === posSide(t.side)).sort((a, b) => b.closedAt - a.closedAt)[0] ?? null;
-      if (!posClose && now() - t.updated_at.getTime() < 600_000) return; // both histories can lag: next pass
+      if (!posClose && waited < 600_000) return; // both histories can lag: next pass
     }
     if (histError) await event(rt.acct.id, t, "history_unavailable", { message: histError });
     const qty = closing.reduce((s, o) => s + o.executedQty, 0);
@@ -899,6 +904,7 @@ export function createExecutor(deps: {
     for (const o of open.filter((o) => o.positionSide === posSide(t.side))) await rt.ex.cancelOrder(t.symbol, o.orderId);
     // Owner 2026-11-17 (HANA came twice): only the pass that really closes the trade books it and reports it.
     const claimed = await pool.query("UPDATE ex_trades SET status = 'closed', updated_at = now() WHERE id = $1 AND status <> 'closed' RETURNING id", [t.id]);
+    goneSince.delete(t.id);
     if (!claimed.rowCount) return;
     const cur = await updateTrade(t.id, {
       status: "closed", closed_at: new Date(last?.updateTime || posClose?.closedAt || now()), exit_price: exit, pnl: result,
